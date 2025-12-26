@@ -12,6 +12,7 @@
     "bin"
   ],
   "scripts": {
+    "run": "node bin/cli.js run",
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "accounts": "node src/accounts-cli.js",

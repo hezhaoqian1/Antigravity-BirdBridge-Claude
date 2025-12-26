@@ -2,7 +2,8 @@
 
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { homedir } from 'os';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -25,7 +26,8 @@ USAGE:
   antigravity-claude-proxy <command> [options]
 
 COMMANDS:
-  start                 Start the proxy server (default port: 8080)
+  run                   Auto-configure Claude Code and start proxy (recommended)
+  start                 Start the proxy server only (default port: 8080)
   accounts              Manage Google accounts (interactive)
   accounts add          Add a new Google account via OAuth
   accounts list         List all configured accounts
@@ -41,19 +43,50 @@ ENVIRONMENT:
   PORT                  Server port (default: 8080)
 
 EXAMPLES:
+  antigravity-claude-proxy run          # One-click setup and start
   antigravity-claude-proxy start
   PORT=3000 antigravity-claude-proxy start
   antigravity-claude-proxy accounts add
-  antigravity-claude-proxy accounts list
-
-CONFIGURATION:
-  Claude Code CLI (~/.claude/settings.json):
-    {
-      "env": {
-        "ANTHROPIC_BASE_URL": "http://localhost:8080"
-      }
-    }
 `);
+}
+
+function setupClaudeConfig() {
+  const claudeDir = join(homedir(), '.claude');
+  const settingsPath = join(claudeDir, 'settings.json');
+  const port = process.env.PORT || 8080;
+
+  // Ensure .claude directory exists
+  if (!existsSync(claudeDir)) {
+    mkdirSync(claudeDir, { recursive: true });
+    console.log(`Created ${claudeDir}`);
+  }
+
+  // Read existing settings or create new
+  let settings = {};
+  if (existsSync(settingsPath)) {
+    try {
+      settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+    } catch (e) {
+      // ignore parse errors
+    }
+  }
+
+  // Merge env settings
+  const proxyEnv = {
+    ANTHROPIC_AUTH_TOKEN: 'test',
+    ANTHROPIC_BASE_URL: `http://localhost:${port}`,
+    ANTHROPIC_MODEL: 'claude-opus-4-5-thinking',
+    ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-5-thinking',
+    ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-4-5-thinking',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-sonnet-4-5',
+    CLAUDE_CODE_SUBAGENT_MODEL: 'claude-opus-4-5-thinking'
+  };
+
+  settings.env = { ...settings.env, ...proxyEnv };
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+
+  console.log(`Claude Code configured: ${settingsPath}`);
+  console.log(`Proxy URL: http://localhost:${port}\n`);
 }
 
 function showVersion() {
@@ -74,6 +107,12 @@ async function main() {
 
   // Handle commands
   switch (command) {
+    case 'run':
+      // Auto-configure and start
+      setupClaudeConfig();
+      await import('../src/index.js');
+      break;
+
     case 'start':
     case undefined:
       // Default to starting the server
