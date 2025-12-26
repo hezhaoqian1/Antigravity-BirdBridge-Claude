@@ -66,18 +66,43 @@ cd Antigravity-BirdBridge-Claude && npm install && npm run run
 
 ## 多账号模式（可选）
 
-如需负载均衡，可添加多个 Google 账号：
+如需负载均衡以减少限流等待，可添加多个 Google 账号。
+
+### 添加账号
 
 ```bash
+# 添加第一个账号（会打开浏览器进行 Google OAuth 授权）
+npx antigravity-claude-proxy accounts add
+
+# 继续添加更多账号（重复执行，最多支持 10 个）
 npx antigravity-claude-proxy accounts add
 ```
 
-多账号特性：
+### 账号管理
+
+```bash
+npx antigravity-claude-proxy accounts list    # 查看所有账号
+npx antigravity-claude-proxy accounts verify  # 验证账号有效性
+npx antigravity-claude-proxy accounts remove  # 删除账号
+npx antigravity-claude-proxy accounts         # 交互式管理
+```
+
+### 常见问题
+
+**需要每次重新登录吗？**
+不需要。账号信息（refresh token）保存在 `~/.config/antigravity-proxy/accounts.json`，只需添加一次即可永久使用。
+
+**添加账号后如何启动？**
+启动命令不变，仍然是 `npx antigravity-claude-proxy run`。代理会自动使用所有已添加的账号。
+
+### 多账号特性
+
 - **粘性账号选择**：尽量保持使用同一账号，提高缓存命中率
 - **智能限流处理**：短限流等待，长限流自动切换账号
 - **自动冷却**：限流账号在重置时间后自动恢复
 
-查看账号状态：
+### 查看账号状态
+
 ```bash
 curl "http://localhost:8080/account-limits?format=table"
 ```
