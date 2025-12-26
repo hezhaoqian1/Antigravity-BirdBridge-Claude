@@ -65,7 +65,11 @@ function setupClaudeConfig() {
   let settings = {};
   if (existsSync(settingsPath)) {
     try {
-      settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+      const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+      // Validate settings is a plain object
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        settings = parsed;
+      }
     } catch (e) {
       // ignore parse errors
     }
