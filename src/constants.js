@@ -117,7 +117,7 @@ export const MAX_RETRIES = 5; // Max retry attempts across accounts
 export const MAX_ACCOUNTS = 10; // Maximum number of accounts allowed
 
 // Rate limit wait thresholds
-export const MAX_WAIT_BEFORE_ERROR_MS = 120000; // 2 minutes - throw error if wait exceeds this
+export const MAX_WAIT_BEFORE_ERROR_MS = 5000; // 5 seconds - switch to next account if wait exceeds this
 
 // Thinking model constants
 export const CLAUDE_THINKING_MAX_OUTPUT_TOKENS = 64000; // Max output tokens for thinking models
