@@ -282,6 +282,10 @@ export async function sendMessage(anthropicRequest, accountManager) {
     const maxAttempts = Math.max(MAX_RETRIES, accountManager.getAccountCount() + 1);
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (accountManager.getAccountCount() === 0) {
+            throw new Error('No accounts configured. Run "npm run accounts" first.');
+        }
+
         // Use sticky account selection for cache continuity
         const { account: stickyAccount, waitMs } = accountManager.pickStickyAccount();
         let account = stickyAccount;
@@ -545,6 +549,10 @@ export async function* sendMessageStream(anthropicRequest, accountManager) {
     const maxAttempts = Math.max(MAX_RETRIES, accountManager.getAccountCount() + 1);
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (accountManager.getAccountCount() === 0) {
+            throw new Error('No accounts configured. Run "npm run accounts" first.');
+        }
+
         // Use sticky account selection for cache continuity
         const { account: stickyAccount, waitMs } = accountManager.pickStickyAccount();
         let account = stickyAccount;

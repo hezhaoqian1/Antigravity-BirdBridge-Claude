@@ -4,8 +4,14 @@ import { AccountCard } from './components/AccountCard';
 import { StatsPanel } from './components/StatsPanel';
 
 function App() {
-  const { data: accounts, isLoading: accountsLoading, refetch: refetchAccounts, dataUpdatedAt } = useAccountLimits();
+  const { data: accountLimits, isLoading: accountsLoading, refetch: refetchAccounts, dataUpdatedAt } = useAccountLimits();
   const { data: health, isLoading: healthLoading } = useHealth();
+
+  const accounts = accountLimits?.accounts ?? [];
+  const preferredModel =
+    accountLimits?.models?.find((model) => model.includes('claude-sonnet')) ??
+    accountLimits?.models?.find((model) => model.includes('claude')) ??
+    accountLimits?.models?.[0];
 
   const handleRefresh = () => {
     refetchAccounts();
@@ -54,7 +60,8 @@ function App() {
             Account Status
             {accounts && (
               <span className="ml-2 text-sm font-normal text-gray-500">
-                ({accounts.length} accounts)
+                ({accounts.length}
+                {accountLimits?.totalAccounts !== undefined ? ` / ${accountLimits.totalAccounts}` : ''})
               </span>
             )}
           </h2>
@@ -82,20 +89,21 @@ function App() {
         )}
 
         {/* Account Cards Grid */}
-        {!accountsLoading && accounts && (
+        {!accountsLoading && accounts && accounts.length > 0 && (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {accounts.map((account) => (
               <AccountCard
                 key={account.email}
                 account={account}
                 isActive={health?.currentAccount === account.email}
+                primaryModelId={preferredModel}
               />
             ))}
           </div>
         )}
 
         {/* Empty State */}
-        {!accountsLoading && (!accounts || accounts.length === 0) && (
+        {!accountsLoading && accounts.length === 0 && (
           <div className="text-center py-12">
             <div className="text-gray-500 mb-4">
               <Rocket className="w-12 h-12 mx-auto opacity-50" />

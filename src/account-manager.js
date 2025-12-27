@@ -144,7 +144,7 @@ export class AccountManager {
      * @returns {boolean} True if all accounts are rate-limited
      */
     isAllRateLimited() {
-        if (this.#accounts.length === 0) return true;
+        if (this.#accounts.length === 0) return false;
         return this.#accounts.every(acc => acc.isRateLimited);
     }
 

@@ -10,7 +10,13 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { sendMessage, sendMessageStream, listModels, getModelQuotas } from './cloudcode-client.js';
 import { forceRefresh } from './token-extractor.js';
-import { REQUEST_BODY_LIMIT, BACKGROUND_TASK_PATTERNS, FREE_MODEL_FOR_BACKGROUND } from './constants.js';
+import {
+    REQUEST_BODY_LIMIT,
+    BACKGROUND_TASK_PATTERNS,
+    FREE_MODEL_FOR_BACKGROUND,
+    MODEL_MAPPINGS,
+    AVAILABLE_MODELS
+} from './constants.js';
 import { AccountManager } from './account-manager.js';
 import { formatDuration } from './utils/helpers.js';
 
@@ -62,11 +68,21 @@ app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
 const dashboardPath = path.join(__dirname, '../dashboard/dist');
 app.use(express.static(dashboardPath));
 
+const SUPPORTED_MODEL_IDS = new Set([
+    ...Object.keys(MODEL_MAPPINGS),
+    ...Object.values(MODEL_MAPPINGS),
+    ...AVAILABLE_MODELS.map(model => model.id)
+]);
+
+function isSupportedModel(modelId) {
+    return typeof modelId === 'string' && SUPPORTED_MODEL_IDS.has(modelId);
+}
+
 /**
  * Token Saver: Detect if a request is a background task that can use a free model
  * (Inspired by Antigravity-Manager's unique feature)
  * @param {Array} messages - The messages array from the request
- * @param {string} system - The system prompt
+ * @param {string|Array} system - The system prompt
  * @returns {boolean} True if this is a background task
  */
 function isBackgroundTask(messages, system) {
@@ -472,10 +488,17 @@ app.post('/v1/messages', async (req, res) => {
             });
         }
 
-        // Token Saver: Detect background tasks and redirect to free model
+        // Token Saver: Detect background tasks and redirect to a cheaper model
         let effectiveModel = model || 'claude-3-5-sonnet-20241022';
-        if (isBackgroundTask(messages, system)) {
-            console.log(`[TOKEN_SAVER] Detected background task, redirecting from ${effectiveModel} to ${FREE_MODEL_FOR_BACKGROUND}`);
+        const canDowngrade =
+            (!tools || tools.length === 0) &&
+            !thinking &&
+            isSupportedModel(FREE_MODEL_FOR_BACKGROUND);
+
+        if (canDowngrade && isBackgroundTask(messages, system)) {
+            console.log(
+                `[TOKEN_SAVER] Detected background task, redirecting from ${effectiveModel} to ${FREE_MODEL_FOR_BACKGROUND}`
+            );
             effectiveModel = FREE_MODEL_FOR_BACKGROUND;
         }
 

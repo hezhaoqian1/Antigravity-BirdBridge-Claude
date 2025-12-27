@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
-import type { AccountLimit, HealthStatus } from '../types'
+import type { AccountLimitsResponse, HealthStatus } from '../types'
 
-async function fetchAccountLimits(): Promise<AccountLimit[]> {
+async function fetchAccountLimits(): Promise<AccountLimitsResponse> {
   const response = await fetch('/account-limits')
   if (!response.ok) {
     throw new Error('Failed to fetch account limits')
@@ -18,14 +18,14 @@ async function fetchHealth(): Promise<HealthStatus> {
 }
 
 export function useAccountLimits() {
-  return useQuery({
+  return useQuery<AccountLimitsResponse>({
     queryKey: ['accountLimits'],
     queryFn: fetchAccountLimits,
   })
 }
 
 export function useHealth() {
-  return useQuery({
+  return useQuery<HealthStatus>({
     queryKey: ['health'],
     queryFn: fetchHealth,
     refetchInterval: 5000, // Refresh health more frequently

@@ -32,6 +32,10 @@ interface StatsPanelProps {
 }
 
 export function StatsPanel({ health, isLoading }: StatsPanelProps) {
+  const serverTime = health?.timestamp
+    ? new Date(health.timestamp).toLocaleTimeString()
+    : new Date().toLocaleTimeString();
+
   if (isLoading) {
     return (
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
@@ -67,7 +71,7 @@ export function StatsPanel({ health, isLoading }: StatsPanelProps) {
       <StatsCard
         icon={<Clock className="w-5 h-5" />}
         label="Server Time"
-        value={new Date().toLocaleTimeString()}
+        value={serverTime}
         color="text-blue-400"
       />
     </div>

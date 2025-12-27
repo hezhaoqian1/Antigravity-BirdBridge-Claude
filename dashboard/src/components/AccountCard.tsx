@@ -1,17 +1,52 @@
 import { User, AlertCircle, CheckCircle, Clock } from 'lucide-react';
-import type { AccountLimit } from '../types';
+import type { AccountLimit, AccountQuota } from '../types';
 import { QuotaBar } from './QuotaBar';
 
 interface AccountCardProps {
   account: AccountLimit;
   isActive?: boolean;
+  primaryModelId?: string;
 }
 
-export function AccountCard({ account, isActive = false }: AccountCardProps) {
-  const { email, isLoggedIn, limits, error } = account;
+function pickQuota(
+  limits: AccountLimit['limits'],
+  preferredModel?: string,
+): { id: string; data: AccountQuota } | null {
+  if (!limits) return null;
+  const candidates = new Set<string>();
+  if (preferredModel) candidates.add(preferredModel);
+  Object.keys(limits).forEach((modelId) => candidates.add(modelId));
 
-  // Mask email for privacy
+  for (const modelId of candidates) {
+    const quota = limits[modelId];
+    if (quota) {
+      return { id: modelId, data: quota };
+    }
+  }
+
+  return null;
+}
+
+function formatModelId(modelId?: string) {
+  if (!modelId) return 'Unknown Model';
+  return modelId
+    .replace(/claude-?/i, 'Claude ')
+    .replace(/-/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+export function AccountCard({ account, isActive = false, primaryModelId }: AccountCardProps) {
+  const { email, status, limits, error } = account;
   const maskedEmail = email.replace(/(.{2})(.*)(@.*)/, '$1***$3');
+  const isLoggedIn = status === 'ok';
+  const quotaInfo = pickQuota(limits, primaryModelId);
+  const quotaPercent =
+    quotaInfo?.data.remainingFraction !== null && quotaInfo?.data.remainingFraction !== undefined
+      ? Math.round(Math.max(0, Math.min(1, quotaInfo.data.remainingFraction)) * 100)
+      : null;
+  const tierLabel = formatModelId(quotaInfo?.id);
+  const resetTime = quotaInfo?.data.resetTime ? new Date(quotaInfo.data.resetTime).toLocaleTimeString() : null;
 
   const getStatusIcon = () => {
     if (error) return <AlertCircle className="w-5 h-5 text-red-400" />;
@@ -21,8 +56,8 @@ export function AccountCard({ account, isActive = false }: AccountCardProps) {
 
   const getStatusText = () => {
     if (error) return 'Error';
-    if (!isLoggedIn) return 'Not Logged In';
-    if (limits && limits.remainingDailyTokens === 0) return 'Quota Exhausted';
+    if (!isLoggedIn) return status === 'invalid' ? 'Invalid' : 'Unavailable';
+    if (quotaPercent === 0) return 'Quota Exhausted';
     return 'Active';
   };
 
@@ -43,7 +78,7 @@ export function AccountCard({ account, isActive = false }: AccountCardProps) {
           <div>
             <p className="font-medium text-gray-200">{maskedEmail}</p>
             <p className="text-xs text-gray-500">
-              {limits?.tier || 'Unknown Tier'}
+              {tierLabel}
             </p>
           </div>
         </div>
@@ -71,24 +106,27 @@ export function AccountCard({ account, isActive = false }: AccountCardProps) {
       )}
 
       {/* Quota Bars */}
-      {limits && (
+      {quotaInfo ? (
         <div className="space-y-3">
-          <QuotaBar
-            used={limits.dailyTokenLimit - limits.remainingDailyTokens}
-            total={limits.dailyTokenLimit}
-            label="Daily Tokens"
-          />
-          <QuotaBar
-            used={limits.minuteRequestLimit - limits.remainingMinuteRequests}
-            total={limits.minuteRequestLimit}
-            label="Requests/min"
-          />
-          {limits.resetTime && (
+          {quotaPercent !== null ? (
+            <QuotaBar
+              used={100 - quotaPercent}
+              total={100}
+              label="Quota Remaining"
+            />
+          ) : (
+            <p className="text-xs text-gray-500">Quota percentage unavailable</p>
+          )}
+          {resetTime && (
             <p className="text-xs text-gray-500 text-right">
-              Resets: {new Date(limits.resetTime).toLocaleTimeString()}
+              Resets: {resetTime}
             </p>
           )}
         </div>
+      ) : (
+        <p className="text-sm text-gray-500">
+          No quota data returned for this account.
+        </p>
       )}
 
       {/* Active Indicator */}

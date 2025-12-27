@@ -134,7 +134,9 @@ export const BACKGROUND_TASK_PATTERNS = [
     'generate a short title',
     'summarize the conversation'
 ];
-export const FREE_MODEL_FOR_BACKGROUND = 'gemini-2.5-flash'; // Free model for background tasks
+// Background jobs should continue to run on a supported Claude SKU so we stick
+// with the thinking tier that has proven compatible in production.
+export const FREE_MODEL_FOR_BACKGROUND = 'claude-opus-4-5-thinking';
 
 // Thinking model constants
 export const CLAUDE_THINKING_MAX_OUTPUT_TOKENS = 64000; // Max output tokens for thinking models

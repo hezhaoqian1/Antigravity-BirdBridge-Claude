@@ -1,15 +1,21 @@
+export interface AccountQuota {
+  remaining: string | null;
+  remainingFraction: number | null;
+  resetTime: string | null;
+}
+
 export interface AccountLimit {
   email: string;
-  isLoggedIn: boolean;
-  limits: {
-    tier: string;
-    dailyTokenLimit: number;
-    remainingDailyTokens: number;
-    minuteRequestLimit: number;
-    remainingMinuteRequests: number;
-    resetTime?: string;
-  } | null;
-  error?: string;
+  status: string;
+  error: string | null;
+  limits: Record<string, AccountQuota | null>;
+}
+
+export interface AccountLimitsResponse {
+  timestamp: string;
+  totalAccounts: number;
+  models: string[];
+  accounts: AccountLimit[];
 }
 
 export interface HealthStatus {
@@ -17,6 +23,7 @@ export interface HealthStatus {
   activeAccounts: number;
   totalAccounts: number;
   currentAccount: string | null;
+  timestamp: string;
 }
 
 export interface ProxyStats {

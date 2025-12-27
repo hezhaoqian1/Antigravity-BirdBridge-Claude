@@ -8,11 +8,16 @@
 # 终端 1：一键配置并启动代理
 npx antigravity-claude-proxy run
 
+# 或者在克隆/开发模式下
+git clone https://github.com/hezhaoqian1/Antigravity-BirdBridge-Claude.git
+cd Antigravity-BirdBridge-Claude && npm install
+npm start   # 直接启动 Express 服务（不修改 Claude Code 配置）
+
 # 终端 2：使用 Claude Code
 claude
 ```
 
-就这么简单！`run` 命令会自动配置 Claude Code 的 settings.json 并启动代理。
+就这么简单！`run` 命令（或 `npm run run`）会先检查本地环境、自动配置 Claude Code 的 `settings.json`，然后再启动代理；`npm start` 则是最轻量的“只启动服务”方式，便于本地开发或自定义部署流程。
 
 > **前置条件**：需要安装并登录 [Antigravity](https://antigravity.so)，代理会自动读取令牌。
 
@@ -56,8 +61,8 @@ cd Antigravity-BirdBridge-Claude && npm install && npm run run
 
 | 命令 | 说明 |
 |------|------|
-| `run` | **推荐** - 自动配置 Claude Code 并启动代理 |
-| `start` | 仅启动代理（不修改配置） |
+| `run` / `npm run run` | **推荐**节点：CLI 包装层，先校验环境并配置 Claude Code，再启动代理 |
+| `start` | 仅启动 `src/index.js`（零额外动作，适合本地开发或自建服务守护） |
 | `accounts add` | 添加 Google 账号（OAuth 多账号模式） |
 | `accounts list` | 列出所有账号 |
 | `accounts verify` | 验证账号状态 |
@@ -99,7 +104,7 @@ npx antigravity-claude-proxy accounts         # 交互式管理
 
 - **智能等待/切换策略**：≤10秒自动等待，10-60秒切换账号，>60秒报错
 - **时间窗口锁定**：60秒内复用同一账号，提高缓存命中率
-- **Token Saver**：后台任务（标题生成、摘要等）自动降级到免费模型
+- **Token Saver**：后台任务（标题、摘要等）自动降级到 `claude-opus-4-5-thinking`，节省高阶算力
 - **503 + Retry-After**：限流时返回标准响应头，客户端可智能重试
 - **自动冷却**：限流账号在重置时间后自动恢复
 
@@ -127,7 +132,7 @@ open http://localhost:8080/dashboard
 
 - **实时状态**：显示代理状态、活跃账号数、当前使用账号
 - **账号卡片**：每个账号的状态、配额进度条、重置时间
-- **自动刷新**：每 30 秒自动刷新账号配额信息
+- **自动刷新**：健康状态每 5 秒更新一次、配额信息每 30 秒刷新一次
 
 ### 技术栈
 
