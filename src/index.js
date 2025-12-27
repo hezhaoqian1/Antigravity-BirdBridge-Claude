@@ -22,6 +22,7 @@ app.listen(PORT, () => {
 ║    GET  /health       - Health check                         ║
 ║    GET  /account-limits - Account status & quotas              ║
 ║    POST /refresh-token - Force token refresh                 ║
+║    GET  /dashboard     - Web Dashboard UI                    ║
 ║                                                              ║
 ║  Usage with Claude Code:                                     ║
 ║    export ANTHROPIC_BASE_URL=http://localhost:${PORT}          ║

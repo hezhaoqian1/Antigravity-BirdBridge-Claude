@@ -9,12 +9,17 @@
   },
   "files": [
     "src",
-    "bin"
+    "bin",
+    "dashboard/dist"
   ],
   "scripts": {
     "run": "node bin/cli.js run",
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
+    "dashboard:install": "cd dashboard && npm install",
+    "dashboard:build": "cd dashboard && npm run build",
+    "dashboard:dev": "cd dashboard && npm run dev",
+    "build": "npm run dashboard:build",
     "accounts": "node src/accounts-cli.js",
     "accounts:add": "node src/accounts-cli.js add",
     "accounts:list": "node src/accounts-cli.js list",

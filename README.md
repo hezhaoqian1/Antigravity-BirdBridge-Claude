@@ -97,15 +97,44 @@ npx antigravity-claude-proxy accounts         # 交互式管理
 
 ### 多账号特性
 
-- **粘性账号选择**：尽量保持使用同一账号，提高缓存命中率
-- **智能限流处理**：短限流等待，长限流自动切换账号
+- **智能等待/切换策略**：≤10秒自动等待，10-60秒切换账号，>60秒报错
+- **时间窗口锁定**：60秒内复用同一账号，提高缓存命中率
+- **Token Saver**：后台任务（标题生成、摘要等）自动降级到免费模型
+- **503 + Retry-After**：限流时返回标准响应头，客户端可智能重试
 - **自动冷却**：限流账号在重置时间后自动恢复
 
 ### 查看账号状态
 
 ```bash
+# 命令行查看
 curl "http://localhost:8080/account-limits?format=table"
+
+# 或打开 Web Dashboard
+open http://localhost:8080/dashboard
 ```
+
+---
+
+## Web Dashboard
+
+代理服务器内置了一个可视化 Dashboard，用于监控账号状态和配额使用情况。
+
+### 访问方式
+
+启动代理后，访问 `http://localhost:8080/dashboard`
+
+### Dashboard 功能
+
+- **实时状态**：显示代理状态、活跃账号数、当前使用账号
+- **账号卡片**：每个账号的状态、配额进度条、重置时间
+- **自动刷新**：每 30 秒自动刷新账号配额信息
+
+### 技术栈
+
+- React 18 + TypeScript
+- TanStack Query（数据获取和缓存）
+- TailwindCSS（样式）
+- Vite（构建工具）
 
 ---
 
@@ -128,6 +157,7 @@ curl "http://localhost:8080/account-limits?format=table"
 | `/v1/messages` | POST | Anthropic Messages API |
 | `/v1/models` | GET | 列出可用模型 |
 | `/refresh-token` | POST | 强制刷新令牌 |
+| `/dashboard` | GET | Web Dashboard UI |
 
 ---
 

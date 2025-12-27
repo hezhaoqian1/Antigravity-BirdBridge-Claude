@@ -16,7 +16,9 @@ import {
     ANTIGRAVITY_ENDPOINT_FALLBACKS,
     ANTIGRAVITY_HEADERS,
     DEFAULT_PROJECT_ID,
-    MAX_WAIT_BEFORE_ERROR_MS
+    SHORT_WAIT_THRESHOLD_MS,
+    MAX_WAIT_BEFORE_ERROR_MS,
+    TIME_WINDOW_LOCK_MS
 } from './constants.js';
 import { refreshAccessToken } from './oauth.js';
 import { formatDuration } from './utils/helpers.js';
@@ -31,6 +33,10 @@ export class AccountManager {
     // Per-account caches
     #tokenCache = new Map(); // email -> { token, extractedAt }
     #projectCache = new Map(); // email -> projectId
+
+    // Time window lock for cache optimization (inspired by Antigravity-Manager)
+    #lastUsedAccount = null; // email of last used account
+    #lastUsedTime = null; // timestamp when last used
 
     constructor(configPath = ACCOUNT_CONFIG_PATH) {
         this.#configPath = configPath;
@@ -273,12 +279,15 @@ export class AccountManager {
 
     /**
      * Check if we should wait for the current account's rate limit to reset.
-     * Used for sticky account selection - wait if rate limit is short (≤ threshold).
-     * @returns {{shouldWait: boolean, waitMs: number, account: Object|null}}
+     * Implements intelligent wait/switch strategy:
+     * - ≤10s: always wait (SHORT_WAIT_THRESHOLD_MS)
+     * - 10-60s: switch if other accounts available, otherwise wait
+     * - >60s: error immediately (MAX_WAIT_BEFORE_ERROR_MS)
+     * @returns {{shouldWait: boolean, waitMs: number, account: Object|null, shouldSwitch: boolean}}
      */
     shouldWaitForCurrentAccount() {
         if (this.#accounts.length === 0) {
-            return { shouldWait: false, waitMs: 0, account: null };
+            return { shouldWait: false, waitMs: 0, account: null, shouldSwitch: false };
         }
 
         // Clamp index to valid range
@@ -290,37 +299,97 @@ export class AccountManager {
         const account = this.#accounts[this.#currentIndex];
 
         if (!account || account.isInvalid) {
-            return { shouldWait: false, waitMs: 0, account: null };
+            return { shouldWait: false, waitMs: 0, account: null, shouldSwitch: false };
         }
 
         if (account.isRateLimited && account.rateLimitResetTime) {
             const waitMs = account.rateLimitResetTime - Date.now();
 
-            // If wait time is within threshold, recommend waiting
-            if (waitMs > 0 && waitMs <= MAX_WAIT_BEFORE_ERROR_MS) {
-                return { shouldWait: true, waitMs, account };
+            if (waitMs <= 0) {
+                // Already expired
+                return { shouldWait: false, waitMs: 0, account, shouldSwitch: false };
             }
+
+            // ≤10s: always wait (not worth switching)
+            if (waitMs <= SHORT_WAIT_THRESHOLD_MS) {
+                return { shouldWait: true, waitMs, account, shouldSwitch: false };
+            }
+
+            // 10-60s: check if other accounts are available
+            if (waitMs <= MAX_WAIT_BEFORE_ERROR_MS) {
+                const available = this.getAvailableAccounts();
+                if (available.length > 0) {
+                    // Other accounts available - switch instead of waiting
+                    return { shouldWait: false, waitMs, account, shouldSwitch: true };
+                }
+                // No other accounts - wait
+                return { shouldWait: true, waitMs, account, shouldSwitch: false };
+            }
+
+            // >60s: don't wait, will trigger error
+            return { shouldWait: false, waitMs, account, shouldSwitch: false };
         }
 
-        return { shouldWait: false, waitMs: 0, account };
+        return { shouldWait: false, waitMs: 0, account, shouldSwitch: false };
     }
 
     /**
-     * Pick an account with sticky selection preference.
-     * Prefers the current account for cache continuity, only switches when:
-     * - Current account is rate-limited for > 2 minutes
-     * - Current account is invalid
+     * Pick an account with sticky selection preference and time window lock.
+     * Implements:
+     * 1. Time window lock: 60s内强制复用同一账号 (for cache optimization)
+     * 2. Intelligent wait/switch strategy
      * @returns {{account: Object|null, waitMs: number}} Account to use and optional wait time
      */
     pickStickyAccount() {
+        // Time window lock: If we used an account within TIME_WINDOW_LOCK_MS, prefer it
+        if (this.#lastUsedAccount && this.#lastUsedTime) {
+            const timeSinceLastUse = Date.now() - this.#lastUsedTime;
+            if (timeSinceLastUse < TIME_WINDOW_LOCK_MS) {
+                // Find the last used account
+                const lockedAccount = this.#accounts.find(a => a.email === this.#lastUsedAccount);
+                if (lockedAccount && !lockedAccount.isRateLimited && !lockedAccount.isInvalid) {
+                    lockedAccount.lastUsed = Date.now();
+                    this.#lastUsedTime = Date.now();
+                    this.saveToDisk();
+                    return { account: lockedAccount, waitMs: 0 };
+                }
+                // Locked account is rate-limited or invalid, check if we should wait
+                if (lockedAccount && lockedAccount.isRateLimited && lockedAccount.rateLimitResetTime) {
+                    const waitMs = lockedAccount.rateLimitResetTime - Date.now();
+                    // If short wait (≤10s), wait for the locked account to maintain cache
+                    if (waitMs > 0 && waitMs <= SHORT_WAIT_THRESHOLD_MS) {
+                        console.log(`[AccountManager] Time window lock: waiting ${formatDuration(waitMs)} for ${lockedAccount.email}`);
+                        return { account: null, waitMs };
+                    }
+                }
+            }
+        }
+
         // First try to get the current sticky account
         const stickyAccount = this.getCurrentStickyAccount();
         if (stickyAccount) {
+            // Update time window lock
+            this.#lastUsedAccount = stickyAccount.email;
+            this.#lastUsedTime = Date.now();
             return { account: stickyAccount, waitMs: 0 };
         }
 
         // Check if we should wait for current account
         const waitInfo = this.shouldWaitForCurrentAccount();
+
+        if (waitInfo.shouldSwitch) {
+            // Switch to another account instead of waiting
+            console.log(`[AccountManager] Switching from ${waitInfo.account.email} (wait ${formatDuration(waitInfo.waitMs)}) to another account`);
+            const nextAccount = this.pickNext();
+            if (nextAccount) {
+                // Update time window lock
+                this.#lastUsedAccount = nextAccount.email;
+                this.#lastUsedTime = Date.now();
+                console.log(`[AccountManager] Switched to: ${nextAccount.email}`);
+            }
+            return { account: nextAccount, waitMs: 0 };
+        }
+
         if (waitInfo.shouldWait) {
             console.log(`[AccountManager] Waiting ${formatDuration(waitInfo.waitMs)} for sticky account: ${waitInfo.account.email}`);
             return { account: null, waitMs: waitInfo.waitMs };
@@ -329,6 +398,9 @@ export class AccountManager {
         // Current account unavailable for too long, switch to next available
         const nextAccount = this.pickNext();
         if (nextAccount) {
+            // Update time window lock
+            this.#lastUsedAccount = nextAccount.email;
+            this.#lastUsedTime = Date.now();
             console.log(`[AccountManager] Switched to new account for cache: ${nextAccount.email}`);
         }
         return { account: nextAccount, waitMs: 0 };
@@ -610,6 +682,21 @@ export class AccountManager {
                 lastUsed: a.lastUsed
             }))
         };
+    }
+
+    /**
+     * Get the currently active account (last used in time window)
+     * @returns {object|null} The current account or null if none
+     */
+    getCurrentAccount() {
+        if (this.#lastUsedAccount && this.#accounts.length > 0) {
+            return this.#accounts.find(a => a.email === this.#lastUsedAccount) || null;
+        }
+        // Return the account at current index
+        if (this.#accounts.length > 0) {
+            return this.#accounts[this.#currentIndex] || this.#accounts[0];
+        }
+        return null;
     }
 
     /**

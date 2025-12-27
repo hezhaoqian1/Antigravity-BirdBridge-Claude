@@ -6,11 +6,17 @@
 
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { sendMessage, sendMessageStream, listModels, getModelQuotas } from './cloudcode-client.js';
 import { forceRefresh } from './token-extractor.js';
-import { REQUEST_BODY_LIMIT } from './constants.js';
+import { REQUEST_BODY_LIMIT, BACKGROUND_TASK_PATTERNS, FREE_MODEL_FOR_BACKGROUND } from './constants.js';
 import { AccountManager } from './account-manager.js';
 import { formatDuration } from './utils/helpers.js';
+
+// Get directory path for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 
@@ -52,30 +58,96 @@ async function ensureInitialized() {
 app.use(cors());
 app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
 
+// Serve static files from dashboard build directory
+const dashboardPath = path.join(__dirname, '../dashboard/dist');
+app.use(express.static(dashboardPath));
+
+/**
+ * Token Saver: Detect if a request is a background task that can use a free model
+ * (Inspired by Antigravity-Manager's unique feature)
+ * @param {Array} messages - The messages array from the request
+ * @param {string} system - The system prompt
+ * @returns {boolean} True if this is a background task
+ */
+function isBackgroundTask(messages, system) {
+    // Combine all content into a single string for pattern matching
+    const allContent = [];
+
+    // Add system prompt
+    if (system) {
+        if (typeof system === 'string') {
+            allContent.push(system.toLowerCase());
+        } else if (Array.isArray(system)) {
+            system.forEach(s => {
+                if (typeof s === 'string') allContent.push(s.toLowerCase());
+                else if (s.text) allContent.push(s.text.toLowerCase());
+            });
+        }
+    }
+
+    // Add message content (focus on first few messages)
+    const messagesToCheck = messages.slice(0, 3);
+    for (const msg of messagesToCheck) {
+        if (typeof msg.content === 'string') {
+            allContent.push(msg.content.toLowerCase());
+        } else if (Array.isArray(msg.content)) {
+            msg.content.forEach(block => {
+                if (block.text) allContent.push(block.text.toLowerCase());
+            });
+        }
+    }
+
+    const combined = allContent.join(' ');
+
+    // Check against background task patterns
+    for (const pattern of BACKGROUND_TASK_PATTERNS) {
+        if (combined.includes(pattern.toLowerCase())) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 /**
  * Parse error message to extract error type, status code, and user-friendly message
+ * Now supports 503 with Retry-After for rate limit errors (inspired by ProxyCast)
  */
-function parseError(error) {
+function parseError(error, accountManager = null) {
     let errorType = 'api_error';
     let statusCode = 500;
     let errorMessage = error.message;
+    let retryAfterSeconds = null;
 
     if (error.message.includes('401') || error.message.includes('UNAUTHENTICATED')) {
         errorType = 'authentication_error';
         statusCode = 401;
         errorMessage = 'Authentication failed. Make sure Antigravity is running with a valid token.';
     } else if (error.message.includes('429') || error.message.includes('RESOURCE_EXHAUSTED') || error.message.includes('QUOTA_EXHAUSTED')) {
-        errorType = 'invalid_request_error';  // Use invalid_request_error to force client to purge/stop
-        statusCode = 400;  // Use 400 to ensure client does not retry (429 and 529 trigger retries)
+        // Use 503 with Retry-After for rate limit errors (inspired by ProxyCast)
+        errorType = 'overloaded_error';
+        statusCode = 503;
 
         // Try to extract the quota reset time from the error
-        const resetMatch = error.message.match(/quota will reset after (\d+h\d+m\d+s|\d+m\d+s|\d+s)/i);
+        const resetMatch = error.message.match(/quota will reset after ((\d+)h)?(\d+)m(\d+)s|(\d+)s/i);
         const modelMatch = error.message.match(/"model":\s*"([^"]+)"/);
         const model = modelMatch ? modelMatch[1] : 'the model';
 
+        // Calculate retry-after seconds
         if (resetMatch) {
-            errorMessage = `You have exhausted your capacity on ${model}. Quota will reset after ${resetMatch[1]}.`;
+            const hours = parseInt(resetMatch[2] || '0', 10);
+            const minutes = parseInt(resetMatch[3] || '0', 10);
+            const seconds = parseInt(resetMatch[4] || resetMatch[5] || '0', 10);
+            retryAfterSeconds = hours * 3600 + minutes * 60 + seconds;
+            errorMessage = `You have exhausted your capacity on ${model}. Quota will reset after ${resetMatch[0]}.`;
         } else {
+            // Try to get from account manager if provided
+            if (accountManager && accountManager.isAllRateLimited()) {
+                const waitMs = accountManager.getMinWaitTimeMs();
+                retryAfterSeconds = Math.ceil(waitMs / 1000);
+            } else {
+                retryAfterSeconds = 60; // Default 60 seconds
+            }
             errorMessage = `You have exhausted your capacity on ${model}. Please wait for your quota to reset.`;
         }
     } else if (error.message.includes('invalid_request_error') || error.message.includes('INVALID_ARGUMENT')) {
@@ -93,7 +165,7 @@ function parseError(error) {
         errorMessage = 'Permission denied. Check your Antigravity license.';
     }
 
-    return { errorType, statusCode, errorMessage };
+    return { errorType, statusCode, errorMessage, retryAfterSeconds };
 }
 
 // Request logging middleware
@@ -109,9 +181,13 @@ app.get('/health', async (req, res) => {
     try {
         await ensureInitialized();
         const status = accountManager.getStatus();
+        const current = accountManager.getCurrentAccount();
 
         res.json({
             status: 'ok',
+            activeAccounts: status.available,
+            totalAccounts: status.total,
+            currentAccount: current?.email || null,
             accounts: status.summary,
             available: status.available,
             rateLimited: status.rateLimited,
@@ -396,9 +472,16 @@ app.post('/v1/messages', async (req, res) => {
             });
         }
 
+        // Token Saver: Detect background tasks and redirect to free model
+        let effectiveModel = model || 'claude-3-5-sonnet-20241022';
+        if (isBackgroundTask(messages, system)) {
+            console.log(`[TOKEN_SAVER] Detected background task, redirecting from ${effectiveModel} to ${FREE_MODEL_FOR_BACKGROUND}`);
+            effectiveModel = FREE_MODEL_FOR_BACKGROUND;
+        }
+
         // Build the request object
         const request = {
-            model: model || 'claude-3-5-sonnet-20241022',
+            model: effectiveModel,
             messages,
             max_tokens: max_tokens || 4096,
             stream,
@@ -446,7 +529,12 @@ app.post('/v1/messages', async (req, res) => {
             } catch (streamError) {
                 console.error('[API] Stream error:', streamError);
 
-                const { errorType, errorMessage } = parseError(streamError);
+                const { errorType, errorMessage, retryAfterSeconds } = parseError(streamError, accountManager);
+
+                // Add Retry-After header for rate limit errors
+                if (retryAfterSeconds) {
+                    res.write(`retry: ${retryAfterSeconds * 1000}\n`);
+                }
 
                 res.write(`event: error\ndata: ${JSON.stringify({
                     type: 'error',
@@ -464,7 +552,7 @@ app.post('/v1/messages', async (req, res) => {
     } catch (error) {
         console.error('[API] Error:', error);
 
-        let { errorType, statusCode, errorMessage } = parseError(error);
+        let { errorType, statusCode, errorMessage, retryAfterSeconds } = parseError(error, accountManager);
 
         // For auth errors, try to refresh token
         if (errorType === 'authentication_error') {
@@ -490,6 +578,11 @@ app.post('/v1/messages', async (req, res) => {
             })}\n\n`);
             res.end();
         } else {
+            // Add Retry-After header for 503 errors (inspired by ProxyCast)
+            if (retryAfterSeconds && statusCode === 503) {
+                res.setHeader('Retry-After', retryAfterSeconds);
+                console.log(`[API] Added Retry-After header: ${retryAfterSeconds}s`);
+            }
             res.status(statusCode).json({
                 type: 'error',
                 error: {
@@ -502,9 +595,20 @@ app.post('/v1/messages', async (req, res) => {
 });
 
 /**
- * Catch-all for unsupported endpoints
+ * SPA fallback - serve index.html for dashboard routes
  */
-app.use('*', (req, res) => {
+app.get('/dashboard', (req, res) => {
+    res.sendFile(path.join(dashboardPath, 'index.html'));
+});
+
+app.get('/dashboard/*', (req, res) => {
+    res.sendFile(path.join(dashboardPath, 'index.html'));
+});
+
+/**
+ * Catch-all for unsupported API endpoints
+ */
+app.use('/v1/*', (req, res) => {
     res.status(404).json({
         type: 'error',
         error: {
@@ -512,6 +616,13 @@ app.use('*', (req, res) => {
             message: `Endpoint ${req.method} ${req.originalUrl} not found`
         }
     });
+});
+
+/**
+ * Root redirect to dashboard
+ */
+app.get('/', (req, res) => {
+    res.redirect('/dashboard');
 });
 
 export default app;

@@ -116,8 +116,25 @@ export const DEFAULT_COOLDOWN_MS = 60 * 1000; // 1 minute default cooldown
 export const MAX_RETRIES = 5; // Max retry attempts across accounts
 export const MAX_ACCOUNTS = 10; // Maximum number of accounts allowed
 
-// Rate limit wait thresholds
-export const MAX_WAIT_BEFORE_ERROR_MS = 5000; // 5 seconds - switch to next account if wait exceeds this
+// Intelligent rate limit wait thresholds (inspired by Antigravity-Manager)
+// ≤10s: auto wait (not worth switching)
+// 10-60s: switch if other accounts available, otherwise wait
+// >60s: error immediately
+export const SHORT_WAIT_THRESHOLD_MS = 10000; // 10 seconds - always wait
+export const MAX_WAIT_BEFORE_ERROR_MS = 60000; // 60 seconds - max wait before error
+export const TIME_WINDOW_LOCK_MS = 60000; // 60 seconds - time window for sticky account (cache optimization)
+
+// Token Saver: Background task patterns to redirect to free model
+export const BACKGROUND_TASK_PATTERNS = [
+    'write a 5-10 word title',
+    'write a 5–10 word title',
+    'respond with the title',
+    'concise summary',
+    'prompt suggestion generator',
+    'generate a short title',
+    'summarize the conversation'
+];
+export const FREE_MODEL_FOR_BACKGROUND = 'gemini-2.5-flash'; // Free model for background tasks
 
 // Thinking model constants
 export const CLAUDE_THINKING_MAX_OUTPUT_TOKENS = 64000; // Max output tokens for thinking models
@@ -156,7 +173,11 @@ export default {
     DEFAULT_COOLDOWN_MS,
     MAX_RETRIES,
     MAX_ACCOUNTS,
+    SHORT_WAIT_THRESHOLD_MS,
     MAX_WAIT_BEFORE_ERROR_MS,
+    TIME_WINDOW_LOCK_MS,
+    BACKGROUND_TASK_PATTERNS,
+    FREE_MODEL_FOR_BACKGROUND,
     CLAUDE_THINKING_MAX_OUTPUT_TOKENS,
     MIN_SIGNATURE_LENGTH,
     OAUTH_CONFIG,
