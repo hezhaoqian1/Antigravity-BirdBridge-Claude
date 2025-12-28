@@ -63,9 +63,13 @@ cd Antigravity-BirdBridge-Claude && npm install && npm run run
 |------|------|
 | `run` / `npm run run` | **推荐**节点：CLI 包装层，先校验环境并配置 Claude Code，再启动代理 |
 | `start` | 仅启动 `src/index.js`（零额外动作，适合本地开发或自建服务守护） |
+| `dashboard` | 打开 `http://localhost:8080/dashboard` |
 | `accounts add` | 添加 Google 账号（OAuth 多账号模式） |
 | `accounts list` | 列出所有账号 |
 | `accounts verify` | 验证账号状态 |
+| `config show` | 打印当前代理配置（含监听 IP） |
+| `config lan on/off` | 切换 LAN 访问（需重启生效） |
+| `backup [label]` | 立刻生成配置+账号备份到 `~/.config/antigravity-proxy/backups/` |
 
 ---
 
@@ -141,6 +145,13 @@ open http://localhost:8080/dashboard
 - TailwindCSS（样式）
 - Vite（构建工具）
 
+### 新增 · 管理控制 & Flow Monitor
+
+- **OpenAI Chat 兼容层**：新增 `/v1/chat/completions`，可直接在 Cursor、LiteLLM 等依赖 OpenAI 协议的客户端中复用 Antigravity 账号。
+- **Service Controls 面板**：Dashboard 内即可粘贴 `X-Admin-Key`、切换 LAN 访问、查看当前监听 IP，并一键触发配置/账号备份。
+- **Flow Monitor**：后端 `/api/flows` + 前端表格实时记录最近 50 条请求（耗时、账号、错误、stream chunk 体积），方便排查限流与指令问题。
+- **可写配置 API**：新增 `/api/admin/config` 与 `/api/admin/backup`，配合 CLI `config`/`backup` 子命令，可脚本化维护代理。
+
 ---
 
 ## 可用模型
@@ -160,9 +171,13 @@ open http://localhost:8080/dashboard
 | `/health` | GET | 健康检查 |
 | `/account-limits` | GET | 账号状态（加 `?format=table` 输出表格） |
 | `/v1/messages` | POST | Anthropic Messages API |
+| `/v1/chat/completions` | POST | OpenAI Chat API（非 Streaming） |
 | `/v1/models` | GET | 列出可用模型 |
 | `/refresh-token` | POST | 强制刷新令牌 |
 | `/dashboard` | GET | Web Dashboard UI |
+| `/api/flows` | GET | Flow Monitor 最近请求列表 |
+| `/api/admin/config` | GET/POST | 读取或更新代理配置（写操作需 `X-Admin-Key`） |
+| `/api/admin/backup` | POST | 立即创建配置/账号备份 |
 
 ---
 

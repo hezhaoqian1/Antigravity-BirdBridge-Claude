@@ -8,7 +8,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { sendMessage, sendMessageStream, listModels, getModelQuotas } from './cloudcode-client.js';
+import { listModels, getModelQuotas } from './cloudcode-client.js';
 import { forceRefresh } from './token-extractor.js';
 import {
     REQUEST_BODY_LIMIT,
@@ -19,6 +19,11 @@ import {
 } from './constants.js';
 import { AccountManager } from './account-manager.js';
 import { formatDuration } from './utils/helpers.js';
+import { flowMonitor } from './flow-monitor.js';
+import { getConfig, updateConfig } from './services/config-service.js';
+import { createBackup, listBackups } from './services/backup-service.js';
+import { openAIChatToAnthropic, anthropicToOpenAIChat } from './utils/openai-adapter.js';
+import { createDefaultRegistry } from './providers/provider-registry.js';
 
 // Get directory path for ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -28,11 +33,65 @@ const app = express();
 
 // Initialize account manager (will be fully initialized on first request or startup)
 const accountManager = new AccountManager();
+const providerRegistry = createDefaultRegistry(accountManager);
+const runtimeConfig = getConfig();
+flowMonitor.setMaxEntries(runtimeConfig.maxFlowEntries || 200);
 
 // Track initialization status
 let isInitialized = false;
 let initError = null;
 let initPromise = null;
+
+const ADMIN_HEADER = 'x-admin-key';
+
+function hasValidAdminKey(req) {
+    const config = getConfig();
+    const expected = config.adminApiKey;
+    if (!expected) return true;
+    const provided = req.headers[ADMIN_HEADER] || req.query.adminKey;
+    return typeof provided === 'string' && provided === expected;
+}
+
+function requireAdminAuth(req, res) {
+    if (hasValidAdminKey(req)) {
+        return true;
+    }
+    res.status(401).json({
+        status: 'error',
+        error: 'Invalid admin key. Provide via X-Admin-Key header.'
+    });
+    return false;
+}
+
+function sanitizeConfig(config) {
+    const preview = config.adminApiKey ? `${config.adminApiKey.slice(0, 4)}***` : null;
+    return {
+        ...config,
+        adminApiKey: undefined,
+        adminKeyPreview: preview
+    };
+}
+
+function summarizeResponseBody(response) {
+    if (!response) return null;
+    if (Array.isArray(response.content)) {
+        const textBlock = response.content.find(block => block.text);
+        if (textBlock?.text) {
+            return textBlock.text.slice(0, 280);
+        }
+    }
+    if (response.output) {
+        return `${response.output}`.slice(0, 280);
+    }
+    if (response.completion) {
+        return `${response.completion}`.slice(0, 280);
+    }
+    return null;
+}
+
+function getProviderId(req) {
+    return req.header('x-provider') || req.query.provider || 'antigravity';
+}
 
 /**
  * Ensure account manager is initialized (with race condition protection)
@@ -442,19 +501,161 @@ app.post('/refresh-token', async (req, res) => {
 });
 
 /**
+ * Provider metadata
+ */
+app.get('/api/providers', (req, res) => {
+    res.json({ providers: providerRegistry.list() });
+});
+
+/**
+ * Flow monitor endpoints
+ */
+app.get('/api/flows', (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+    res.json({ flows: flowMonitor.listFlows(limit) });
+});
+
+app.get('/api/flows/:id', (req, res) => {
+    const flow = flowMonitor.getFlow(req.params.id);
+    if (!flow) {
+        return res.status(404).json({ error: 'Flow not found' });
+    }
+    res.json(flow);
+});
+
+app.delete('/api/flows', (req, res) => {
+    if (!requireAdminAuth(req, res)) return;
+    flowMonitor.reset();
+    res.json({ status: 'ok' });
+});
+
+/**
+ * Admin config + backup endpoints
+ */
+app.get('/api/admin/config', (req, res) => {
+    res.json({ config: sanitizeConfig(getConfig()) });
+});
+
+app.post('/api/admin/config', (req, res) => {
+    if (!requireAdminAuth(req, res)) return;
+    const payload = req.body || {};
+    const allowed = {};
+
+    if (typeof payload.allowLanAccess === 'boolean') {
+        allowed.allowLanAccess = payload.allowLanAccess;
+    }
+    if (typeof payload.maxFlowEntries === 'number') {
+        allowed.maxFlowEntries = Math.max(50, Math.min(payload.maxFlowEntries, 2000));
+    }
+    if (typeof payload.telemetry === 'boolean') {
+        allowed.telemetry = payload.telemetry;
+    }
+
+    const updated = updateConfig(allowed);
+    flowMonitor.setMaxEntries(updated.maxFlowEntries || 200);
+    res.json({
+        status: 'ok',
+        requiresRestart: Object.prototype.hasOwnProperty.call(allowed, 'allowLanAccess'),
+        config: sanitizeConfig(updated)
+    });
+});
+
+app.get('/api/admin/backups', async (req, res) => {
+    if (!requireAdminAuth(req, res)) return;
+    const backups = await listBackups();
+    res.json({ backups });
+});
+
+app.post('/api/admin/backup', async (req, res) => {
+    if (!requireAdminAuth(req, res)) return;
+    const label = req.body?.label || 'manual';
+    const backup = await createBackup(label);
+    res.json({ status: 'ok', backup });
+});
+
+/**
  * List models endpoint (OpenAI-compatible format)
  */
 app.get('/v1/models', (req, res) => {
-    res.json(listModels());
+    const provider = providerRegistry.get(getProviderId(req));
+    if (!provider) {
+        return res.status(404).json({ error: 'Unknown provider' });
+    }
+    const models = provider.listModels ? provider.listModels() : listModels();
+    res.json(models);
+});
+
+/**
+ * OpenAI-compatible chat completions endpoint
+ */
+app.post('/v1/chat/completions', async (req, res) => {
+    let flow = null;
+    let started = null;
+    const provider = providerRegistry.get(getProviderId(req));
+    if (!provider) {
+        return res.status(404).json({ error: 'Unknown provider' });
+    }
+
+    if (req.body?.stream) {
+        return res.status(400).json({
+            error: { message: 'Streaming via OpenAI chat completions is not supported yet.' }
+        });
+    }
+
+    try {
+        await ensureInitialized();
+        const anthropicPayload = openAIChatToAnthropic(req.body);
+        flow = flowMonitor.startFlow({
+            protocol: 'openai',
+            route: '/v1/chat/completions',
+            model: anthropicPayload.model,
+            provider: provider.id,
+            stream: false,
+            account: accountManager.getCurrentAccount()?.email || null,
+            requestBody: anthropicPayload
+        });
+
+        started = Date.now();
+        const response = await provider.send(anthropicPayload);
+        const openaiResponse = anthropicToOpenAIChat(response, req.body);
+        flowMonitor.completeFlow(flow.id, {
+            responseSummary: summarizeResponseBody(response),
+            usage: response?.usage || response?.usageMetadata || null,
+            latencyMs: Date.now() - started,
+            account: accountManager.getCurrentAccount()?.email || null
+        });
+        res.json(openaiResponse);
+    } catch (error) {
+        console.error('[OpenAI] Error:', error);
+        if (flow) {
+            flowMonitor.completeFlow(flow.id, {
+                error: error.message,
+                latencyMs: started ? Date.now() - started : null
+            });
+        }
+        res.status(500).json({
+            error: { message: error.message }
+        });
+    }
 });
 
 /**
  * Main messages endpoint - Anthropic Messages API compatible
  */
 app.post('/v1/messages', async (req, res) => {
+    let flowEntry = null;
+    let started = null;
+    let provider = null;
     try {
         // Ensure account manager is initialized
         await ensureInitialized();
+        provider = providerRegistry.get(getProviderId(req));
+        if (!provider) {
+            return res.status(404).json({
+                type: 'error',
+                error: { type: 'not_found_error', message: 'Unknown provider' }
+            });
+        }
 
         // Optimistic Retry: If ALL accounts are rate-limited, reset them to force a fresh check.
         // If we have some available accounts, we try them first.
@@ -530,6 +731,17 @@ app.post('/v1/messages', async (req, res) => {
             });
         }
 
+        flowEntry = flowMonitor.startFlow({
+            protocol: 'anthropic',
+            route: '/v1/messages',
+            model: request.model,
+            provider: provider.id,
+            stream: !!stream,
+            account: accountManager.getCurrentAccount()?.email || null,
+            requestBody: request
+        });
+        started = Date.now();
+
         if (stream) {
             // Handle streaming response
             res.setHeader('Content-Type', 'text/event-stream');
@@ -542,15 +754,25 @@ app.post('/v1/messages', async (req, res) => {
 
             try {
                 // Use the streaming generator with account manager
-                for await (const event of sendMessageStream(request, accountManager)) {
+                for await (const event of provider.stream(request)) {
+                    flowMonitor.appendChunk(flowEntry.id, event);
                     res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
                     // Flush after each event for real-time streaming
                     if (res.flush) res.flush();
                 }
                 res.end();
+                flowMonitor.completeFlow(flowEntry.id, {
+                    responseSummary: '[stream]',
+                    latencyMs: Date.now() - started,
+                    account: accountManager.getCurrentAccount()?.email || null
+                });
 
             } catch (streamError) {
                 console.error('[API] Stream error:', streamError);
+                flowMonitor.completeFlow(flowEntry.id, {
+                    error: streamError.message,
+                    latencyMs: Date.now() - started
+                });
 
                 const { errorType, errorMessage, retryAfterSeconds } = parseError(streamError, accountManager);
 
@@ -568,12 +790,24 @@ app.post('/v1/messages', async (req, res) => {
 
         } else {
             // Handle non-streaming response
-            const response = await sendMessage(request, accountManager);
+            const response = await provider.send(request);
+            flowMonitor.completeFlow(flowEntry.id, {
+                responseSummary: summarizeResponseBody(response),
+                usage: response?.usage,
+                latencyMs: Date.now() - started,
+                account: accountManager.getCurrentAccount()?.email || null
+            });
             res.json(response);
         }
 
     } catch (error) {
         console.error('[API] Error:', error);
+        if (flowEntry) {
+            flowMonitor.completeFlow(flowEntry.id, {
+                error: error.message,
+                latencyMs: started ? Date.now() - started : null
+            });
+        }
 
         let { errorType, statusCode, errorMessage, retryAfterSeconds } = parseError(error, accountManager);
 

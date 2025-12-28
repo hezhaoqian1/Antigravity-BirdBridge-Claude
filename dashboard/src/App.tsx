@@ -1,11 +1,16 @@
 import { RefreshCw, Rocket } from 'lucide-react';
 import { useAccountLimits, useHealth } from './hooks/useAccountLimits';
+import { useAdminConfig, useFlowList } from './hooks/useRuntimeData';
 import { AccountCard } from './components/AccountCard';
 import { StatsPanel } from './components/StatsPanel';
+import { ServicePanel } from './components/ServicePanel';
+import { FlowTable } from './components/FlowTable';
 
 function App() {
   const { data: accountLimits, isLoading: accountsLoading, refetch: refetchAccounts, dataUpdatedAt } = useAccountLimits();
   const { data: health, isLoading: healthLoading } = useHealth();
+  const { data: adminConfig, isLoading: configLoading, updateConfig, updating } = useAdminConfig();
+  const { data: flowData, isLoading: flowsLoading } = useFlowList();
 
   const accounts = accountLimits?.accounts ?? [];
   const preferredModel =
@@ -15,6 +20,24 @@ function App() {
 
   const handleRefresh = () => {
     refetchAccounts();
+  };
+
+  const handleToggleLan = (enabled: boolean, adminKey: string) =>
+    updateConfig({ adminKey, allowLanAccess: enabled });
+
+  const handleBackup = async (adminKey: string) => {
+    const res = await fetch('/api/admin/backup', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-key': adminKey,
+      },
+      body: JSON.stringify({ label: 'dashboard' }),
+    });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(error?.error || '备份失败');
+    }
   };
 
   return (
@@ -53,6 +76,14 @@ function App() {
       <main className="max-w-7xl mx-auto px-4 py-6">
         {/* Stats Panel */}
         <StatsPanel health={health} isLoading={healthLoading} />
+
+        <ServicePanel
+          config={adminConfig?.config}
+          isLoading={configLoading}
+          updating={updating}
+          onToggleLan={handleToggleLan}
+          onBackup={handleBackup}
+        />
 
         {/* Accounts Section */}
         <div className="mb-4">
@@ -114,6 +145,10 @@ function App() {
             </p>
           </div>
         )}
+
+        <div className="mt-8">
+          <FlowTable flows={flowData?.flows} isLoading={flowsLoading} />
+        </div>
       </main>
 
       {/* Footer */}

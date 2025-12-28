@@ -34,3 +34,48 @@ export interface ProxyStats {
   backgroundTasksRedirected: number;
   uptime: number;
 }
+
+export interface FlowUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+}
+
+export interface FlowEntry {
+  id: string;
+  createdAt: string;
+  updatedAt: string | null;
+  status: 'in_progress' | 'completed' | 'failed';
+  protocol: string;
+  route: string;
+  model: string;
+  provider: string;
+  stream: boolean;
+  account: string | null;
+  request: Record<string, unknown>;
+  response: string | null;
+  error: string | null;
+  chunks: Array<{
+    timestamp: string;
+    type: string;
+    size: number;
+  }>;
+  usage?: FlowUsage | null;
+  latencyMs?: number | null;
+}
+
+export interface FlowListResponse {
+  flows: FlowEntry[];
+}
+
+export interface AdminConfig {
+  allowLanAccess: boolean;
+  listenHost: string;
+  telemetry: boolean;
+  maxFlowEntries: number;
+  adminKeyPreview: string | null;
+  updatedAt: string;
+}
+
+export interface AdminConfigResponse {
+  config: AdminConfig;
+}

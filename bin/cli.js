@@ -4,9 +4,11 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
+import { spawn } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const DEFAULT_PORT = 8080;
 
 // Read package.json for version
 const packageJson = JSON.parse(
@@ -28,12 +30,16 @@ USAGE:
 COMMANDS:
   run                   Auto-configure Claude Code and start proxy (recommended)
   start                 Start the proxy server only (default port: 8080)
+  dashboard             Open the local dashboard in your browser
   accounts              Manage Google accounts (interactive)
   accounts add          Add a new Google account via OAuth
   accounts list         List all configured accounts
   accounts remove       Remove accounts interactively
   accounts verify       Verify account tokens are valid
   accounts clear        Remove all accounts
+  config show           Print current proxy configuration
+  config lan <on|off>   Toggle LAN access (requires restart)
+  backup [label]        Create a config/accounts backup
 
 OPTIONS:
   --help, -h            Show this help message
@@ -97,6 +103,47 @@ function showVersion() {
   console.log(packageJson.version);
 }
 
+function openDashboard() {
+  const port = process.env.PORT || DEFAULT_PORT;
+  const url = `http://localhost:${port}/dashboard`;
+  const platform = process.platform;
+  let cmd = 'xdg-open';
+  if (platform === 'darwin') cmd = 'open';
+  if (platform === 'win32') cmd = 'start';
+  console.log(`Opening ${url} ...`);
+  spawn(cmd, [url], { stdio: 'inherit', shell: true });
+}
+
+async function handleConfigCommand(subArgs) {
+  const action = subArgs[0] || 'show';
+  const value = subArgs[1];
+  const { getConfig, updateConfig } = await import('../src/services/config-service.js');
+
+  if (action === 'show') {
+    console.log(JSON.stringify(getConfig(), null, 2));
+    return;
+  }
+
+  if (action === 'lan') {
+    if (!['on', 'off'].includes(value)) {
+      console.log('Usage: antigravity-claude-proxy config lan <on|off>');
+      return;
+    }
+    const updated = updateConfig({ allowLanAccess: value === 'on' });
+    console.log(`LAN access ${value === 'on' ? 'enabled' : 'disabled'}. Restart the server to apply.`);
+    console.log(`Listen host: ${updated.listenHost}`);
+    return;
+  }
+
+  console.log('Unknown config action. Try "show" or "lan".');
+}
+
+async function handleBackupCommand(label = 'manual') {
+  const { createBackup } = await import('../src/services/backup-service.js');
+  const backup = await createBackup(label);
+  console.log(`Backup created at ${backup.path}`);
+}
+
 async function main() {
   // Handle flags
   if (args.includes('--help') || args.includes('-h')) {
@@ -113,7 +160,11 @@ async function main() {
   switch (command) {
     case 'run':
       // Auto-configure and start
-      setupClaudeConfig();
+      try {
+        setupClaudeConfig();
+      } catch (err) {
+        console.warn(`[CLI] Warning: failed to update Claude settings (${err.message}). Continuing...`);
+      }
       await import('../src/index.js');
       break;
 
@@ -131,6 +182,18 @@ async function main() {
       break;
     }
 
+    case 'dashboard':
+      openDashboard();
+      break;
+
+    case 'config':
+      await handleConfigCommand(args.slice(1));
+      break;
+
+    case 'backup':
+      await handleBackupCommand(args[1]);
+      break;
+
     case 'help':
       showHelp();
       break;
@@ -147,6 +210,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('Error:', err.message);
+  console.error('Error:', err.stack || err.message);
   process.exit(1);
 });
