@@ -61,15 +61,18 @@ cd Antigravity-BirdBridge-Claude && npm install && npm run run
 
 | 命令 | 说明 |
 |------|------|
-| `run` / `npm run run` | **推荐**节点：CLI 包装层，先校验环境并配置 Claude Code，再启动代理 |
-| `start` | 仅启动 `src/index.js`（零额外动作，适合本地开发或自建服务守护） |
-| `dashboard` | 打开 `http://localhost:8080/dashboard` |
-| `accounts add` | 添加 Google 账号（OAuth 多账号模式） |
-| `accounts list` | 列出所有账号 |
-| `accounts verify` | 验证账号状态 |
-| `config show` | 打印当前代理配置（含监听 IP） |
-| `config lan on/off` | 切换 LAN 访问（需重启生效） |
-| `backup [label]` | 立刻生成配置+账号备份到 `~/.config/antigravity-proxy/backups/` |
+| `run` / `npm run run` | **推荐**：一键配置 Claude CLI 并启动代理 |
+| `start` | 仅启动 `src/index.js`（不触碰配置，适合守护进程 / PM2） |
+| `dashboard` | 在默认浏览器中打开 `http://localhost:8080/dashboard` |
+| `accounts add/list/remove/verify/clear` | 多账号管理 |
+| `accounts status` | 以表格显示账号健康评分、限流倒计时、是否推荐 |
+| `flows export [--days N] [--output file.json]` | 将最近 N 天的 Flow 日志导出为 JSON |
+| `config show` | 打印当前代理配置（含监听 IP、防火墙状态） |
+| `config lan on/off` | 切换 LAN 访问（需重启） |
+| `config backup <label>` | 手动创建配置/账号备份（自动保留最近 5 份） |
+| `config list` | 列出可用备份 |
+| `config restore <name>` | 从指定备份恢复（恢复后需重启） |
+| `backup [label]` | 兼容旧版的备份命令（内部调用 `config backup`） |
 
 ---
 
@@ -151,6 +154,77 @@ open http://localhost:8080/dashboard
 - **Service Controls 面板**：Dashboard 内即可粘贴 `X-Admin-Key`、切换 LAN 访问、查看当前监听 IP，并一键触发配置/账号备份。
 - **Flow Monitor**：后端 `/api/flows` + 前端表格实时记录最近 50 条请求（耗时、账号、错误、stream chunk 体积），方便排查限流与指令问题。
 - **可写配置 API**：新增 `/api/admin/config` 与 `/api/admin/backup`，配合 CLI `config`/`backup` 子命令，可脚本化维护代理。
+
+---
+
+## 桌面 App（Tauri）
+
+仓库根目录下新增 `tauri/`，提供一个 Tauri 打包的桌面控制台，可一键启动/停止代理，并监听日志、托盘状态。
+
+### 功能一览
+
+- **Start / Stop**：通过 Rust → Node IPC 启动 `desktop/proxy-daemon.js`，与 CLI 共用 `startProxy/stopProxy`。
+- **Dashboard / Logs / Reconfigure**：主界面按钮可打开 Dashboard、`~/.antigravity-proxy/desktop.log`，或一键修复 `.claude/settings.json`。
+- **状态面板**：展示当前账号、端口、LAN、限流倒计时，若检测到 Claude CLI 配置被修改会弹出修复提示。
+- **托盘菜单**：Start、Stop、Open Dashboard、View Logs、Quit；图标颜色会根据状态切换（绿=运行、黄=限流、红=停止）。
+- **打包**：`npm run tauri:build` 会生成 `.dmg`（macOS）与 `.msi`（Windows）。
+
+### 开发/构建
+
+```bash
+cd tauri
+npm install
+npm run tauri:dev    # 调试
+npm run tauri:build  # 产出安装包
+```
+
+---
+
+## Flow 日志与导出
+
+- 所有请求会持久化到 `~/.antigravity-proxy/flows/YYYY-MM-DD.ndjson`，保留 7 天自动清理。
+- Dashboard `Recent Requests` 区新增 “导出 JSON / 下载 NDJSON” 按钮。
+- REST API：
+  - `GET /api/flows?export=json&days=3&limit=200` → 返回最近 N 天的合并数据。
+  - `GET /api/flows?export=file&day=2025-12-28` → 直接下载对应日期的 `.ndjson`。
+- CLI：
+  ```bash
+  antigravity-claude-proxy flows export --days 2 --output flows.json
+  ```
+
+---
+
+## 限流可见性 & 账号健康评分
+
+- `src/account-manager.js` 现在会记录每个账号的 `success/error count`、`lastSuccess/Failure`、`rateLimitResetTime`，并计算 `healthScore`。
+- CLI `accounts status` 将表格输出状态、下一次可用时间、成功率以及 ⭐ 推荐账号。
+- Dashboard 卡片新增倒计时、健康值标签、推荐徽章。
+- `/account-limits` 响应包含 `recommendedAccount` 以及 `meta` 字段（限流状态、统计信息），供外部系统复用。
+- 托盘图标会在检测到所有账号限流时自动变黄，并在提示中显示最近的解封时间。
+
+---
+
+## 备份策略（config + accounts）
+
+- 自动备份：启动时以及每次 `config lan` / Dashboard 写配置都会生成一份备份，最多保留 5 个最近版本。
+- 存放路径：`~/.config/antigravity-proxy/backups/<timestamp>-<label>/config.json + accounts.json`
+- CLI：
+
+  ```bash
+  antigravity-claude-proxy config backup nightly
+  antigravity-claude-proxy config list
+  antigravity-claude-proxy config restore 2025-01-02T12-00-00-nightly
+  ```
+
+- Dashboard 的 “One-click backup” 按钮会以 `dashboard` 标签落盘，方便手工留档。
+
+---
+
+## `.claude/settings.json` 冲突检测
+
+- `src/index.js` 启动后会轮询 `~/.claude/settings.json`。若用户手动改写导致 `ANTHROPIC_BASE_URL` 等字段偏离代理配置，会在 CLI 与桌面 App 中显示告警。
+- CLI `accounts status` 输出会提示冲突，并指导使用 `antigravity-claude-proxy run` 或桌面端的 “Reconfigure Claude CLI” 修复。
+- Tauri UI 中同样会展示黄色告警条，可一键重写 `.claude/settings.json`。
 
 ---
 

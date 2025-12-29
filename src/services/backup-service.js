@@ -1,10 +1,10 @@
 import { promises as fs, existsSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { ACCOUNT_CONFIG_PATH } from '../constants.js';
 import { getConfigRoot, getConfigPath } from './config-service.js';
 
 const BACKUP_ROOT = join(getConfigRoot(), 'backups');
-const MAX_BACKUPS = 10;
+const MAX_BACKUPS = 5;
 
 async function ensureBackupDir() {
     await fs.mkdir(BACKUP_ROOT, { recursive: true });
@@ -12,6 +12,7 @@ async function ensureBackupDir() {
 
 async function copyIfExists(source, destination) {
     if (existsSync(source)) {
+        await fs.mkdir(dirname(destination), { recursive: true }).catch(() => {});
         await fs.copyFile(source, destination);
         return true;
     }
@@ -70,4 +71,35 @@ export async function pruneBackups(limit = MAX_BACKUPS) {
 
 export function getBackupRoot() {
     return BACKUP_ROOT;
+}
+
+export async function restoreBackup(name) {
+    if (!name) throw new Error('Backup name is required');
+    await ensureBackupDir();
+    const folder = join(BACKUP_ROOT, name);
+    if (!existsSync(folder)) {
+        throw new Error(`Backup "${name}" not found`);
+    }
+
+    const configPath = join(folder, 'config.json');
+    const accountsPath = join(folder, 'accounts.json');
+
+    const tasks = [];
+    if (existsSync(configPath)) {
+        tasks.push(
+            fs.mkdir(dirname(getConfigPath()), { recursive: true })
+                .then(() => fs.copyFile(configPath, getConfigPath()))
+        );
+    }
+    if (existsSync(accountsPath)) {
+        tasks.push(
+            fs.mkdir(dirname(ACCOUNT_CONFIG_PATH), { recursive: true })
+                .then(() => fs.copyFile(accountsPath, ACCOUNT_CONFIG_PATH))
+        );
+    }
+    if (!tasks.length) {
+        throw new Error(`Backup "${name}" does not contain config or account files`);
+    }
+    await Promise.all(tasks);
+    return { restored: tasks.length, name };
 }

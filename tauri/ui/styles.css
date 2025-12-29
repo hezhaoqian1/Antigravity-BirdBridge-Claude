@@ -1,0 +1,171 @@
+:root {
+  font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #f1f5f9;
+  background: #0f172a;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.shell {
+  width: 460px;
+  padding: 32px;
+  background: #1e293b;
+  border-radius: 24px;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.5);
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.subtitle {
+  margin: 4px 0 0;
+  color: #94a3b8;
+  font-size: 0.9rem;
+}
+
+.status-card {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin: 24px 0;
+  padding: 18px 24px;
+  background: #0f172a;
+  border-radius: 18px;
+  border: 1px solid #1e293b;
+}
+
+.indicator {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  box-shadow: 0 0 20px currentColor;
+}
+
+.indicator-idle {
+  background: #f87171;
+  color: #f87171;
+}
+
+.indicator-running {
+  background: #34d399;
+  color: #34d399;
+}
+
+.indicator-warning {
+  background: #facc15;
+  color: #facc15;
+}
+
+.status-text {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.status-meta {
+  color: #94a3b8;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.stats-grid div {
+  background: #0f172a;
+  padding: 12px 16px;
+  border-radius: 16px;
+  border: 1px solid #1f2937;
+}
+
+.label {
+  display: block;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: #94a3b8;
+  letter-spacing: 0.05em;
+}
+
+.controls,
+.actions {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+button {
+  flex: 1;
+  padding: 12px;
+  border-radius: 999px;
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.primary {
+  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  color: white;
+}
+
+.secondary {
+  background: #334155;
+  color: #e2e8f0;
+}
+
+.actions button {
+  background: #1f2937;
+  color: #e2e8f0;
+}
+
+.warning {
+  background: rgba(250, 204, 21, 0.1);
+  color: #facc15;
+  border: 1px solid rgba(250, 204, 21, 0.4);
+  border-radius: 16px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.warning code {
+  background: rgba(15, 23, 42, 0.6);
+  padding: 0 6px;
+  border-radius: 6px;
+}
+
+.hidden {
+  display: none;
+}
+
+.log-output {
+  margin-top: 16px;
+}
+
+.error-box {
+  min-height: 48px;
+  padding: 12px 16px;
+  background: #0f172a;
+  border-radius: 12px;
+  border: 1px solid #1e293b;
+  color: #f87171;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+}

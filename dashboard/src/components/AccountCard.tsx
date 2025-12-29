@@ -1,4 +1,4 @@
-import { User, AlertCircle, CheckCircle, Clock } from 'lucide-react';
+import { User, AlertCircle, CheckCircle, Clock, Star } from 'lucide-react';
 import type { AccountLimit, AccountQuota } from '../types';
 import { QuotaBar } from './QuotaBar';
 
@@ -6,6 +6,18 @@ interface AccountCardProps {
   account: AccountLimit;
   isActive?: boolean;
   primaryModelId?: string;
+}
+
+function formatCountdown(target?: number | null) {
+  if (!target) return null
+  const remaining = target - Date.now()
+  if (remaining <= 0) return null
+  const minutes = Math.floor(remaining / 60000)
+  const seconds = Math.floor((remaining % 60000) / 1000)
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`
+  }
+  return `${seconds}s`
 }
 
 function pickQuota(
@@ -37,9 +49,9 @@ function formatModelId(modelId?: string) {
 }
 
 export function AccountCard({ account, isActive = false, primaryModelId }: AccountCardProps) {
-  const { email, status, limits, error } = account;
+  const { email, status, limits, error, meta } = account;
   const maskedEmail = email.replace(/(.{2})(.*)(@.*)/, '$1***$3');
-  const isLoggedIn = status === 'ok';
+  const isLoggedIn = status === 'ok' && !meta?.isInvalid;
   const quotaInfo = pickQuota(limits, primaryModelId);
   const quotaPercent =
     quotaInfo?.data.remainingFraction !== null && quotaInfo?.data.remainingFraction !== undefined
@@ -47,16 +59,23 @@ export function AccountCard({ account, isActive = false, primaryModelId }: Accou
       : null;
   const tierLabel = formatModelId(quotaInfo?.id);
   const resetTime = quotaInfo?.data.resetTime ? new Date(quotaInfo.data.resetTime).toLocaleTimeString() : null;
+  const countdown = meta?.isRateLimited ? formatCountdown(meta.nextAvailableAt || meta.rateLimitResetTime) : null;
+  const healthScore = meta?.healthScore;
+  const stats = meta?.stats;
+  const totalCalls = stats ? stats.successCount + stats.errorCount : 0;
+  const successRate = stats && totalCalls > 0 ? Math.round((stats.successCount / totalCalls) * 100) : null;
 
   const getStatusIcon = () => {
-    if (error) return <AlertCircle className="w-5 h-5 text-red-400" />;
+    if (error || meta?.isInvalid) return <AlertCircle className="w-5 h-5 text-red-400" />;
     if (!isLoggedIn) return <Clock className="w-5 h-5 text-yellow-400" />;
     return <CheckCircle className="w-5 h-5 text-green-400" />;
   };
 
   const getStatusText = () => {
+    if (meta?.isInvalid) return meta.invalidReason ? `Invalid (${meta.invalidReason})` : 'Invalid';
     if (error) return 'Error';
-    if (!isLoggedIn) return status === 'invalid' ? 'Invalid' : 'Unavailable';
+    if (meta?.isRateLimited) return countdown ? `Cooldown ${countdown}` : 'Rate-limited';
+    if (!isLoggedIn) return 'Unavailable';
     if (quotaPercent === 0) return 'Quota Exhausted';
     return 'Active';
   };
@@ -95,6 +114,16 @@ export function AccountCard({ account, isActive = false, primaryModelId }: Accou
           >
             {getStatusText()}
           </span>
+          {meta?.recommended && (
+            <span className="flex items-center gap-1 text-xs text-amber-300">
+              <Star className="w-3 h-3" /> 推荐
+            </span>
+          )}
+          {typeof healthScore === 'number' && (
+            <span className="text-xs px-2 py-0.5 bg-gray-700 rounded-full text-gray-200">
+              Health {healthScore}
+            </span>
+          )}
         </div>
       </div>
 
@@ -136,6 +165,13 @@ export function AccountCard({ account, isActive = false, primaryModelId }: Accou
             <span className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" />
             Currently Active
           </span>
+        </div>
+      )}
+
+      {stats && (
+        <div className="mt-3 pt-3 border-t border-gray-700 text-xs text-gray-400 flex justify-between">
+          <span>Success: {stats.successCount} / {totalCalls}</span>
+          {successRate !== null && <span>{successRate}% ok</span>}
         </div>
       )}
     </div>

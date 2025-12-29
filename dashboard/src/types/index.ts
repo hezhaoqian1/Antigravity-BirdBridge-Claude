@@ -9,13 +9,34 @@ export interface AccountLimit {
   status: string;
   error: string | null;
   limits: Record<string, AccountQuota | null>;
+  meta?: AccountMeta | null;
 }
 
 export interface AccountLimitsResponse {
   timestamp: string;
   totalAccounts: number;
   models: string[];
+  recommendedAccount?: string | null;
   accounts: AccountLimit[];
+}
+
+export interface AccountStats {
+  successCount: number;
+  errorCount: number;
+  lastSuccessAt: number | null;
+  lastFailureAt: number | null;
+}
+
+export interface AccountMeta {
+  isRateLimited: boolean;
+  rateLimitResetTime: number | null;
+  nextAvailableAt: number | null;
+  isInvalid: boolean;
+  invalidReason: string | null;
+  lastUsed: number | null;
+  stats: AccountStats;
+  healthScore: number;
+  recommended: boolean;
 }
 
 export interface HealthStatus {
@@ -65,6 +86,10 @@ export interface FlowEntry {
 
 export interface FlowListResponse {
   flows: FlowEntry[];
+  source?: {
+    memory: number;
+    persisted: number;
+  };
 }
 
 export interface AdminConfig {

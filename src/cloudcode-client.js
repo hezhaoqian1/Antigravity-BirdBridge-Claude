@@ -377,12 +377,15 @@ export async function sendMessage(anthropicRequest, accountManager) {
 
                     // For thinking models, parse SSE and accumulate all parts
                     if (isThinkingModel) {
-                        return await parseThinkingSSEResponse(response, anthropicRequest.model);
+                        const parsed = await parseThinkingSSEResponse(response, anthropicRequest.model);
+                        accountManager.recordSuccess(account.email);
+                        return parsed;
                     }
 
                     // Non-thinking models use regular JSON
                     const data = await response.json();
                     console.log('[CloudCode] Response received');
+                    accountManager.recordSuccess(account.email);
                     return convertGoogleToAnthropic(data, anthropicRequest.model);
 
                 } catch (endpointError) {
@@ -402,6 +405,7 @@ export async function sendMessage(anthropicRequest, accountManager) {
                     accountManager.markRateLimited(account.email, lastError.resetMs);
                     throw new Error(`Rate limited: ${lastError.errorText}`);
                 }
+                accountManager.recordFailure(account.email, { message: lastError.message });
                 throw lastError;
             }
 
@@ -417,6 +421,7 @@ export async function sendMessage(anthropicRequest, accountManager) {
                 continue;
             }
             // Non-rate-limit error: throw immediately
+            accountManager.recordFailure(account.email, { message: error.message });
             throw error;
         }
     }
@@ -641,6 +646,7 @@ export async function* sendMessageStream(anthropicRequest, accountManager) {
                     yield* streamSSEResponse(response, anthropicRequest.model);
 
                     console.log('[CloudCode] Stream completed');
+                    accountManager.recordSuccess(account.email);
                     return;
 
                 } catch (endpointError) {
@@ -660,6 +666,7 @@ export async function* sendMessageStream(anthropicRequest, accountManager) {
                     accountManager.markRateLimited(account.email, lastError.resetMs);
                     throw new Error(`Rate limited: ${lastError.errorText}`);
                 }
+                accountManager.recordFailure(account.email, { message: lastError.message });
                 throw lastError;
             }
 
@@ -675,6 +682,7 @@ export async function* sendMessageStream(anthropicRequest, accountManager) {
                 continue;
             }
             // Non-rate-limit error: throw immediately
+            accountManager.recordFailure(account.email, { message: error.message });
             throw error;
         }
     }

@@ -2,9 +2,13 @@
 
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-import { homedir } from 'os';
+import { readFileSync, writeFileSync } from 'fs';
 import { spawn } from 'child_process';
+import { startProxy, stopProxy, getStatus as getProxyStatus } from '../src/index.js';
+import { ensureClaudeConfig, getClaudeSettingsPath } from '../src/services/claude-config.js';
+import { readPersistedFlows } from '../src/flow-monitor.js';
+import { createBackup, listBackups, restoreBackup } from '../src/services/backup-service.js';
+import { AccountManager } from '../src/account-manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -17,6 +21,125 @@ const packageJson = JSON.parse(
 
 const args = process.argv.slice(2);
 const command = args[0];
+let proxyRunning = false;
+let shuttingDown = false;
+let shutdownRegistered = false;
+
+async function ensureProxyStarted(options = {}) {
+  if (proxyRunning) return;
+  await startProxy(options);
+  proxyRunning = true;
+  registerShutdownHandlers();
+}
+
+async function gracefulShutdown(exitCode = null) {
+  if (!proxyRunning || shuttingDown) {
+    if (exitCode !== null) process.exit(exitCode);
+    return;
+  }
+  shuttingDown = true;
+  try {
+    await stopProxy();
+  } catch (error) {
+    console.warn('[CLI] Failed to stop proxy cleanly:', error.message);
+  } finally {
+    proxyRunning = false;
+    shuttingDown = false;
+    if (exitCode !== null) {
+      process.exit(exitCode);
+    }
+  }
+}
+
+function registerShutdownHandlers() {
+  if (shutdownRegistered) return;
+  const handler = (signal) => {
+    console.log(`\n[CLI] Caught ${signal}, shutting down proxy...`);
+    gracefulShutdown(0);
+  };
+  process.on('SIGINT', handler);
+  process.on('SIGTERM', handler);
+  process.on('exit', () => {
+    if (proxyRunning && !shuttingDown) {
+      stopProxy().catch(() => {});
+    }
+  });
+  shutdownRegistered = true;
+}
+
+function parseFlag(flagArgs, name, fallback = null) {
+  const idx = flagArgs.indexOf(name);
+  if (idx === -1) return fallback;
+  return flagArgs[idx + 1] || fallback;
+}
+
+async function handleFlowsCommand(subArgs) {
+  const action = subArgs[0];
+  const flags = subArgs.slice(1);
+  if (action !== 'export') {
+    console.log('Usage: antigravity-claude-proxy flows export [--days N] [--limit N] [--output file.json]');
+    return;
+  }
+
+  const days = Math.max(parseInt(parseFlag(flags, '--days', '1'), 10) || 1, 1);
+  const limit = Math.min(parseInt(parseFlag(flags, '--limit', '200'), 10) || 200, 1000);
+  const output = parseFlag(flags, '--output', null);
+
+  const flows = await readPersistedFlows({ days, limit });
+  const payload = JSON.stringify(flows, null, 2);
+
+  if (output) {
+    writeFileSync(output, payload);
+    console.log(`Exported ${flows.length} flows to ${output}`);
+  } else {
+    console.log(payload);
+  }
+}
+
+async function showAccountsStatus() {
+  const manager = new AccountManager();
+  await manager.initialize();
+  const status = manager.getStatus();
+  const runtime = getProxyStatus();
+
+  console.log(`Accounts: ${status.available}/${status.total} available (${status.rateLimited} limited, ${status.invalid} invalid)`);
+  if (status.recommendedAccount) {
+    console.log(`Recommended: ${status.recommendedAccount}`);
+  }
+  if (runtime?.currentAccount) {
+    console.log(`Current account: ${runtime.currentAccount}`);
+  }
+  if (runtime?.claudeConfig && runtime.claudeConfig.healthy === false) {
+    console.log('');
+    console.log('⚠ Claude CLI 配置已被修改，与代理不一致。');
+    console.log(`文件: ${runtime.claudeConfig.settingsPath}`);
+    console.log('运行 `antigravity-claude-proxy run` 或在桌面 App 中点击 “Reconfigure Claude CLI” 可自动修复。');
+  }
+  console.log('');
+
+  const header = `${'Email'.padEnd(28)}${'Status'.padEnd(16)}${'Next'.padEnd(18)}${'Health'.padEnd(8)}Success`;
+  console.log(header);
+  console.log('-'.repeat(header.length));
+
+  status.accounts.forEach((account) => {
+    const label = account.recommended ? `⭐ ${account.email}` : account.email;
+    const state = account.isInvalid
+      ? 'invalid'
+      : account.isRateLimited
+      ? 'rate-limited'
+      : 'ok';
+    const next = account.nextAvailableAt
+      ? new Date(account.nextAvailableAt).toLocaleTimeString()
+      : 'now';
+    const score = (account.healthScore ?? 0).toString().padStart(3, ' ');
+    const stats = account.stats || { successCount: 0, errorCount: 0 };
+    const total = (stats.successCount || 0) + (stats.errorCount || 0);
+    const successPct = total > 0 ? Math.round((stats.successCount / total) * 100) : 100;
+    console.log(
+      `${label.padEnd(28)}${state.padEnd(16)}${next.padEnd(18)}${score.padEnd(8)}${stats.successCount}/${total} (${successPct}%)`
+    );
+  });
+}
 
 function showHelp() {
   console.log(`
@@ -30,8 +153,10 @@ USAGE:
 COMMANDS:
   run                   Auto-configure Claude Code and start proxy (recommended)
   start                 Start the proxy server only (default port: 8080)
+  flows export          Export stored flow logs (JSON) with optional filters
   dashboard             Open the local dashboard in your browser
   accounts              Manage Google accounts (interactive)
+  accounts status       Show account health / rate limit status
   accounts add          Add a new Google account via OAuth
   accounts list         List all configured accounts
   accounts remove       Remove accounts interactively
@@ -39,7 +164,10 @@ COMMANDS:
   accounts clear        Remove all accounts
   config show           Print current proxy configuration
   config lan <on|off>   Toggle LAN access (requires restart)
-  backup [label]        Create a config/accounts backup
+  config backup [label] Create a config/accounts backup
+  config list           List stored config backups
+  config restore <id>   Restore a backup (restart required)
+  backup [label]        Legacy alias for config backup
 
 OPTIONS:
   --help, -h            Show this help message
@@ -56,47 +184,11 @@ EXAMPLES:
 `);
 }
 
-function setupClaudeConfig() {
-  const claudeDir = join(homedir(), '.claude');
-  const settingsPath = join(claudeDir, 'settings.json');
-  const port = process.env.PORT || 8080;
-
-  // Ensure .claude directory exists
-  if (!existsSync(claudeDir)) {
-    mkdirSync(claudeDir, { recursive: true });
-    console.log(`Created ${claudeDir}`);
-  }
-
-  // Read existing settings or create new
-  let settings = {};
-  if (existsSync(settingsPath)) {
-    try {
-      const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'));
-      // Validate settings is a plain object
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        settings = parsed;
-      }
-    } catch (e) {
-      // ignore parse errors
-    }
-  }
-
-  // Merge env settings
-  const proxyEnv = {
-    ANTHROPIC_AUTH_TOKEN: 'test',
-    ANTHROPIC_BASE_URL: `http://localhost:${port}`,
-    ANTHROPIC_MODEL: 'claude-opus-4-5-thinking',
-    ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-5-thinking',
-    ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-4-5-thinking',
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-sonnet-4-5',
-    CLAUDE_CODE_SUBAGENT_MODEL: 'claude-opus-4-5-thinking'
-  };
-
-  settings.env = { ...settings.env, ...proxyEnv };
-  writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-
-  console.log(`Claude Code configured: ${settingsPath}`);
-  console.log(`Proxy URL: http://localhost:${port}\n`);
+function configureClaude(port) {
+  const targetPort = port || process.env.PORT || DEFAULT_PORT;
+  ensureClaudeConfig({ port: targetPort });
+  console.log(`Claude Code configured: ${getClaudeSettingsPath()}`);
+  console.log(`Proxy URL: http://localhost:${targetPort}\n`);
 }
 
 function showVersion() {
@@ -130,16 +222,46 @@ async function handleConfigCommand(subArgs) {
       return;
     }
     const updated = updateConfig({ allowLanAccess: value === 'on' });
+    await createBackup('config-change').catch(() => {});
     console.log(`LAN access ${value === 'on' ? 'enabled' : 'disabled'}. Restart the server to apply.`);
     console.log(`Listen host: ${updated.listenHost}`);
     return;
   }
 
-  console.log('Unknown config action. Try "show" or "lan".');
+  if (action === 'backup') {
+    const label = value || 'manual';
+    const backup = await createBackup(label);
+    console.log(`Backup created: ${backup.path}`);
+    return;
+  }
+
+  if (action === 'list') {
+    const backups = await listBackups();
+    if (!backups.length) {
+      console.log('No backups found.');
+      return;
+    }
+    console.log('Available backups:');
+    backups.forEach((backup) => {
+      console.log(`- ${backup.name} (${backup.createdAt})`);
+    });
+    return;
+  }
+
+  if (action === 'restore') {
+    if (!value) {
+      console.log('Usage: antigravity-claude-proxy config restore <backup-name>');
+      return;
+    }
+    await restoreBackup(value);
+    console.log(`Backup "${value}" restored. Restart the proxy to apply.`);
+    return;
+  }
+
+  console.log('Unknown config action. Try "show", "lan", "backup", "list", or "restore".');
 }
 
 async function handleBackupCommand(label = 'manual') {
-  const { createBackup } = await import('../src/services/backup-service.js');
   const backup = await createBackup(label);
   console.log(`Backup created at ${backup.path}`);
 }
@@ -161,26 +283,34 @@ async function main() {
     case 'run':
       // Auto-configure and start
       try {
-        setupClaudeConfig();
+        configureClaude();
       } catch (err) {
         console.warn(`[CLI] Warning: failed to update Claude settings (${err.message}). Continuing...`);
       }
-      await import('../src/index.js');
+      await ensureProxyStarted();
       break;
 
     case 'start':
     case undefined:
       // Default to starting the server
-      await import('../src/index.js');
+      await ensureProxyStarted();
       break;
 
     case 'accounts': {
       // Pass remaining args to accounts CLI
       const subCommand = args[1] || 'add';
+      if (subCommand === 'status') {
+        await showAccountsStatus();
+        break;
+      }
       process.argv = ['node', 'accounts-cli.js', subCommand, ...args.slice(2)];
       await import('../src/accounts-cli.js');
       break;
     }
+
+    case 'flows':
+      await handleFlowsCommand(args.slice(1));
+      break;
 
     case 'dashboard':
       openDashboard();

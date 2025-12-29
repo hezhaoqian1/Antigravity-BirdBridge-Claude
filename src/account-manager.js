@@ -23,6 +23,31 @@ import {
 import { refreshAccessToken } from './oauth.js';
 import { formatDuration } from './utils/helpers.js';
 
+function nowMs() {
+    return Date.now();
+}
+
+function hydrateStats(stats = {}) {
+    return {
+        successCount: stats.successCount || 0,
+        errorCount: stats.errorCount || 0,
+        lastSuccessAt: stats.lastSuccessAt || null,
+        lastFailureAt: stats.lastFailureAt || null
+    };
+}
+
+function computeUsageRatio(stats) {
+    const total = Math.max(stats.successCount + stats.errorCount, 1);
+    return {
+        usageRatio: stats.successCount / total,
+        errorRatio: stats.errorCount / total
+    };
+}
+
+function clampScore(value) {
+    return Math.round(Math.max(-100, Math.min(120, value)));
+}
+
 export class AccountManager {
     #accounts = [];
     #currentIndex = 0;
@@ -54,12 +79,19 @@ export class AccountManager {
             const configData = await readFile(this.#configPath, 'utf-8');
             const config = JSON.parse(configData);
 
-            this.#accounts = (config.accounts || []).map(acc => ({
-                ...acc,
-                isRateLimited: acc.isRateLimited || false,
-                rateLimitResetTime: acc.rateLimitResetTime || null,
-                lastUsed: acc.lastUsed || null
-            }));
+            this.#accounts = (config.accounts || []).map(acc => {
+                const hydrated = {
+                    ...acc,
+                    isRateLimited: acc.isRateLimited || false,
+                    rateLimitResetTime: acc.rateLimitResetTime || null,
+                    lastUsed: acc.lastUsed || null,
+                    stats: hydrateStats(acc.stats),
+                    healthScore: acc.healthScore || 0,
+                    recommended: false
+                };
+                hydrated.healthScore = this.#computeHealthScore(hydrated);
+                return hydrated;
+            });
 
             this.#settings = config.settings || {};
             this.#currentIndex = config.activeIndex || 0;
@@ -70,6 +102,7 @@ export class AccountManager {
             }
 
             console.log(`[AccountManager] Loaded ${this.#accounts.length} account(s) from config`);
+            this.#updateRecommendations();
         } catch (error) {
             if (error.code === 'ENOENT') {
                 // No config file - use single account from Antigravity database
@@ -94,17 +127,23 @@ export class AccountManager {
         try {
             const authData = this.#extractTokenFromDB();
             if (authData?.apiKey) {
-                this.#accounts = [{
+                const baseAccount = {
                     email: authData.email || 'default@antigravity',
                     source: 'database',
                     isRateLimited: false,
                     rateLimitResetTime: null,
-                    lastUsed: null
-                }];
+                    lastUsed: null,
+                    stats: hydrateStats(),
+                    isInvalid: false,
+                    recommended: false
+                };
+                baseAccount.healthScore = this.#computeHealthScore(baseAccount);
+                baseAccount.recommended = true;
+                this.#accounts = [baseAccount];
                 // Pre-cache the token
                 this.#tokenCache.set(this.#accounts[0].email, {
                     token: authData.apiKey,
-                    extractedAt: Date.now()
+                    extractedAt: nowMs()
                 });
                 console.log(`[AccountManager] Loaded default account: ${this.#accounts[0].email}`);
             }
@@ -169,19 +208,21 @@ export class AccountManager {
      * @returns {number} Number of rate limits cleared
      */
     clearExpiredLimits() {
-        const now = Date.now();
+        const now = nowMs();
         let cleared = 0;
 
         for (const account of this.#accounts) {
             if (account.isRateLimited && account.rateLimitResetTime && account.rateLimitResetTime <= now) {
                 account.isRateLimited = false;
                 account.rateLimitResetTime = null;
+                account.healthScore = this.#computeHealthScore(account);
                 cleared++;
                 console.log(`[AccountManager] Rate limit expired for: ${account.email}`);
             }
         }
 
         if (cleared > 0) {
+            this.#updateRecommendations();
             this.saveToDisk();
         }
 
@@ -201,7 +242,35 @@ export class AccountManager {
             // So we clear both.
             account.rateLimitResetTime = null;
         }
+        this.#updateRecommendations();
         console.log('[AccountManager] Reset all rate limits for optimistic retry');
+    }
+
+    #computeHealthScore(account) {
+        const stateWeight = account.isInvalid ? -50 : account.isRateLimited ? -20 : 30;
+        const { usageRatio, errorRatio } = computeUsageRatio(account.stats);
+        const remainingMs = account.rateLimitResetTime ? account.rateLimitResetTime - nowMs() : 0;
+        const cooldownFactor = account.isRateLimited
+            ? Math.max(0, 1 - Math.min(1, remainingMs / DEFAULT_COOLDOWN_MS))
+            : 1;
+        const score =
+            stateWeight +
+            (1 - usageRatio) * 30 +
+            (1 - errorRatio) * 20 +
+            cooldownFactor * 10;
+        return clampScore(score);
+    }
+
+    #updateRecommendations() {
+        let topScore = -Infinity;
+        for (const account of this.#accounts) {
+            if (account.healthScore > topScore && !account.isInvalid) {
+                topScore = account.healthScore;
+            }
+        }
+        this.#accounts.forEach(account => {
+            account.recommended = !account.isInvalid && account.healthScore === topScore && topScore > 0;
+        });
     }
 
     /**
@@ -217,33 +286,27 @@ export class AccountManager {
             return null;
         }
 
-        // Clamp index to valid range
-        if (this.#currentIndex >= this.#accounts.length) {
-            this.#currentIndex = 0;
-        }
+        const ordered = this.#accounts
+            .map((acc, idx) => ({ acc, idx }))
+            .filter(({ acc }) => !acc.isRateLimited && !acc.isInvalid)
+            .sort((a, b) => {
+                const scoreDelta = (b.acc.healthScore || 0) - (a.acc.healthScore || 0);
+                if (scoreDelta !== 0) return scoreDelta;
+                return (b.acc.stats.lastSuccessAt || 0) - (a.acc.stats.lastSuccessAt || 0);
+            });
 
-        // Find next available account starting from index AFTER current
-        for (let i = 1; i <= this.#accounts.length; i++) {
-            const idx = (this.#currentIndex + i) % this.#accounts.length;
-            const account = this.#accounts[idx];
+        const picked = ordered[0];
+        if (!picked) return null;
 
-            if (!account.isRateLimited && !account.isInvalid) {
-                // Set activeIndex to this account (not +1)
-                this.#currentIndex = idx;
-                account.lastUsed = Date.now();
+        this.#currentIndex = picked.idx;
+        picked.acc.lastUsed = nowMs();
 
-                const position = idx + 1;
-                const total = this.#accounts.length;
-                console.log(`[AccountManager] Using account: ${account.email} (${position}/${total})`);
+        const position = picked.idx + 1;
+        const total = this.#accounts.length;
+        console.log(`[AccountManager] Using account: ${picked.acc.email} (${position}/${total})`);
 
-                // Persist the change (don't await to avoid blocking)
-                this.saveToDisk();
-
-                return account;
-            }
-        }
-
-        return null;
+        this.saveToDisk();
+        return picked.acc;
     }
 
     /**
@@ -268,7 +331,7 @@ export class AccountManager {
 
         // Return if available
         if (account && !account.isRateLimited && !account.isInvalid) {
-            account.lastUsed = Date.now();
+                account.lastUsed = nowMs();
             // Persist the change (don't await to avoid blocking)
             this.saveToDisk();
             return account;
@@ -303,7 +366,7 @@ export class AccountManager {
         }
 
         if (account.isRateLimited && account.rateLimitResetTime) {
-            const waitMs = account.rateLimitResetTime - Date.now();
+            const waitMs = account.rateLimitResetTime - nowMs();
 
             if (waitMs <= 0) {
                 // Already expired
@@ -343,19 +406,19 @@ export class AccountManager {
     pickStickyAccount() {
         // Time window lock: If we used an account within TIME_WINDOW_LOCK_MS, prefer it
         if (this.#lastUsedAccount && this.#lastUsedTime) {
-            const timeSinceLastUse = Date.now() - this.#lastUsedTime;
+            const timeSinceLastUse = nowMs() - this.#lastUsedTime;
             if (timeSinceLastUse < TIME_WINDOW_LOCK_MS) {
                 // Find the last used account
                 const lockedAccount = this.#accounts.find(a => a.email === this.#lastUsedAccount);
                 if (lockedAccount && !lockedAccount.isRateLimited && !lockedAccount.isInvalid) {
-                    lockedAccount.lastUsed = Date.now();
-                    this.#lastUsedTime = Date.now();
+                    lockedAccount.lastUsed = nowMs();
+                    this.#lastUsedTime = nowMs();
                     this.saveToDisk();
                     return { account: lockedAccount, waitMs: 0 };
                 }
                 // Locked account is rate-limited or invalid, check if we should wait
                 if (lockedAccount && lockedAccount.isRateLimited && lockedAccount.rateLimitResetTime) {
-                    const waitMs = lockedAccount.rateLimitResetTime - Date.now();
+                    const waitMs = lockedAccount.rateLimitResetTime - nowMs();
                     // If short wait (≤10s), wait for the locked account to maintain cache
                     if (waitMs > 0 && waitMs <= SHORT_WAIT_THRESHOLD_MS) {
                         console.log(`[AccountManager] Time window lock: waiting ${formatDuration(waitMs)} for ${lockedAccount.email}`);
@@ -370,7 +433,7 @@ export class AccountManager {
         if (stickyAccount) {
             // Update time window lock
             this.#lastUsedAccount = stickyAccount.email;
-            this.#lastUsedTime = Date.now();
+            this.#lastUsedTime = nowMs();
             return { account: stickyAccount, waitMs: 0 };
         }
 
@@ -384,7 +447,7 @@ export class AccountManager {
             if (nextAccount) {
                 // Update time window lock
                 this.#lastUsedAccount = nextAccount.email;
-                this.#lastUsedTime = Date.now();
+                this.#lastUsedTime = nowMs();
                 console.log(`[AccountManager] Switched to: ${nextAccount.email}`);
             }
             return { account: nextAccount, waitMs: 0 };
@@ -400,7 +463,7 @@ export class AccountManager {
         if (nextAccount) {
             // Update time window lock
             this.#lastUsedAccount = nextAccount.email;
-            this.#lastUsedTime = Date.now();
+            this.#lastUsedTime = nowMs();
             console.log(`[AccountManager] Switched to new account for cache: ${nextAccount.email}`);
         }
         return { account: nextAccount, waitMs: 0 };
@@ -417,7 +480,11 @@ export class AccountManager {
 
         account.isRateLimited = true;
         const cooldownMs = resetMs || this.#settings.cooldownDurationMs || DEFAULT_COOLDOWN_MS;
-        account.rateLimitResetTime = Date.now() + cooldownMs;
+        account.rateLimitResetTime = nowMs() + cooldownMs;
+        account.stats.errorCount += 1;
+        account.stats.lastFailureAt = nowMs();
+        account.healthScore = this.#computeHealthScore(account);
+        this.#updateRecommendations();
 
         console.log(
             `[AccountManager] Rate limited: ${email}. Available in ${formatDuration(cooldownMs)}`
@@ -437,7 +504,7 @@ export class AccountManager {
 
         account.isInvalid = true;
         account.invalidReason = reason;
-        account.invalidAt = Date.now();
+        account.invalidAt = nowMs();
 
         console.log(
             `[AccountManager] ⚠ Account INVALID: ${email}`
@@ -449,6 +516,40 @@ export class AccountManager {
             `[AccountManager]   Run 'npm run accounts' to re-authenticate this account`
         );
 
+        account.healthScore = this.#computeHealthScore(account);
+        this.#updateRecommendations();
+        this.saveToDisk();
+    }
+
+    recordSuccess(email) {
+        const account = this.#accounts.find(a => a.email === email);
+        if (!account) return;
+        account.stats.successCount += 1;
+        account.stats.lastSuccessAt = nowMs();
+        account.lastUsed = nowMs();
+        account.isRateLimited = false;
+        account.rateLimitResetTime = null;
+        account.isInvalid = false;
+        account.healthScore = this.#computeHealthScore(account);
+        this.#updateRecommendations();
+        this.saveToDisk();
+    }
+
+    recordFailure(email, details = {}) {
+        const account = this.#accounts.find(a => a.email === email);
+        if (!account) return;
+        account.stats.errorCount += 1;
+        account.stats.lastFailureAt = nowMs();
+        if (details.invalidate) {
+            account.isInvalid = true;
+            account.invalidReason = details.invalidate;
+        }
+        if (typeof details.rateLimitMs === 'number') {
+            account.isRateLimited = true;
+            account.rateLimitResetTime = nowMs() + details.rateLimitMs;
+        }
+        account.healthScore = this.#computeHealthScore(account);
+        this.#updateRecommendations();
         this.saveToDisk();
     }
 
@@ -459,7 +560,7 @@ export class AccountManager {
     getMinWaitTimeMs() {
         if (!this.isAllRateLimited()) return 0;
 
-        const now = Date.now();
+        const now = nowMs();
         let minWait = Infinity;
         let soonestAccount = null;
 
@@ -489,7 +590,7 @@ export class AccountManager {
     async getTokenForAccount(account) {
         // Check cache first
         const cached = this.#tokenCache.get(account.email);
-        if (cached && (Date.now() - cached.extractedAt) < TOKEN_REFRESH_INTERVAL_MS) {
+        if (cached && (nowMs() - cached.extractedAt) < TOKEN_REFRESH_INTERVAL_MS) {
             return cached.token;
         }
 
@@ -526,7 +627,7 @@ export class AccountManager {
         // Cache the token
         this.#tokenCache.set(account.email, {
             token,
-            extractedAt: Date.now()
+            extractedAt: nowMs()
         });
 
         return token;
@@ -645,7 +746,10 @@ export class AccountManager {
                     rateLimitResetTime: acc.rateLimitResetTime,
                     isInvalid: acc.isInvalid || false,
                     invalidReason: acc.invalidReason || null,
-                    lastUsed: acc.lastUsed
+                    lastUsed: acc.lastUsed,
+                    stats: acc.stats,
+                    healthScore: acc.healthScore,
+                    recommended: acc.recommended
                 })),
                 settings: this.#settings,
                 activeIndex: this.#currentIndex
@@ -665,12 +769,17 @@ export class AccountManager {
         const available = this.getAvailableAccounts();
         const rateLimited = this.#accounts.filter(a => a.isRateLimited);
         const invalid = this.getInvalidAccounts();
+        const sorted = this.#accounts
+            .filter(a => !a.isInvalid)
+            .sort((a, b) => (b.healthScore || 0) - (a.healthScore || 0));
+        const recommended = sorted[0]?.email || null;
 
         return {
             total: this.#accounts.length,
             available: available.length,
             rateLimited: rateLimited.length,
             invalid: invalid.length,
+            recommendedAccount: recommended,
             summary: `${this.#accounts.length} total, ${available.length} available, ${rateLimited.length} rate-limited, ${invalid.length} invalid`,
             accounts: this.#accounts.map(a => ({
                 email: a.email,
@@ -679,7 +788,11 @@ export class AccountManager {
                 rateLimitResetTime: a.rateLimitResetTime,
                 isInvalid: a.isInvalid || false,
                 invalidReason: a.invalidReason || null,
-                lastUsed: a.lastUsed
+                lastUsed: a.lastUsed,
+                stats: a.stats,
+                healthScore: a.healthScore,
+                recommended: a.recommended,
+                nextAvailableAt: a.isRateLimited ? a.rateLimitResetTime : null
             }))
         };
     }

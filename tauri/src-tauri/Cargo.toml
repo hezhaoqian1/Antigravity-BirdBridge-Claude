@@ -1,0 +1,22 @@
+[package]
+name = "antigravity_desktop"
+version = "0.1.0"
+description = "Desktop shell for Antigravity Claude Proxy"
+authors = ["Antigravity Contributors"]
+edition = "2021"
+rust-version = "1.70"
+
+[dependencies]
+tauri = { version = "1.6", features = ["system-tray", "shell-open-api"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "process", "io-util", "fs", "time"] }
+dirs = "5.0"
+thiserror = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[target.'cfg(not(windows))'.dependencies]
+nix = { version = "0.28", default-features = false, features = ["signal"] }
+
+[build-dependencies]
+tauri-build = { version = "1.6", features = [] }

@@ -1,0 +1,21 @@
+{
+  "name": "antigravity-desktop",
+  "version": "0.1.0",
+  "description": "Tauri desktop shell for Antigravity Claude Proxy",
+  "type": "module",
+  "scripts": {
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "tauri:icon": "tauri icon icon-source.png"
+  },
+  "keywords": [
+    "tauri",
+    "antigravity",
+    "claude"
+  ],
+  "author": "Antigravity Contributors",
+  "license": "MIT",
+  "devDependencies": {
+    "@tauri-apps/cli": "^1.6.3"
+  }
+}

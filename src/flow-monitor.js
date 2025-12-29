@@ -1,10 +1,96 @@
 import crypto from 'crypto';
+import { promises as fs } from 'fs';
+import { existsSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
+
+const FLOW_ROOT = join(homedir(), '.antigravity-proxy', 'flows');
+const DEFAULT_RETENTION_DAYS = 7;
+
+function ensureDate(input) {
+    if (!input) return new Date();
+    if (input instanceof Date) return input;
+    const parsed = new Date(input);
+    if (!Number.isNaN(parsed.getTime())) {
+        return parsed;
+    }
+    return new Date();
+}
+
+function formatDayKey(dateLike) {
+    const date = ensureDate(dateLike);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+async function ensureFlowDir() {
+    await fs.mkdir(FLOW_ROOT, { recursive: true });
+}
+
+function getFlowLogPath(dayLike = new Date()) {
+    const key = typeof dayLike === 'string' ? dayLike : formatDayKey(dayLike);
+    return join(FLOW_ROOT, `${key}.ndjson`);
+}
+
+async function appendFlowRecord(record) {
+    await ensureFlowDir();
+    const filePath = getFlowLogPath(record.createdAt || record.updatedAt || new Date().toISOString());
+    await fs.appendFile(filePath, `${JSON.stringify(record)}\n`);
+}
+
+function serializeFlow(flow) {
+    return {
+        id: flow.id,
+        createdAt: flow.createdAt,
+        updatedAt: flow.updatedAt,
+        status: flow.status,
+        protocol: flow.protocol,
+        route: flow.route,
+        model: flow.model,
+        provider: flow.provider,
+        stream: flow.stream,
+        account: flow.account,
+        request: flow.request,
+        response: flow.response,
+        error: flow.error,
+        chunks: flow.chunks,
+        usage: flow.usage,
+        latencyMs: flow.latencyMs
+    };
+}
+
+function getRetentionThreshold(retentionDays = DEFAULT_RETENTION_DAYS) {
+    const now = new Date();
+    now.setDate(now.getDate() - retentionDays);
+    return now;
+}
+
+async function removeOldFiles(retentionDays = DEFAULT_RETENTION_DAYS) {
+    await ensureFlowDir();
+    const entries = await fs.readdir(FLOW_ROOT, { withFileTypes: true });
+    const threshold = getRetentionThreshold(retentionDays);
+    const minKey = formatDayKey(threshold);
+
+    await Promise.all(
+        entries
+            .filter((entry) => entry.isFile() && entry.name.endsWith('.ndjson'))
+            .map(async (entry) => {
+                const name = entry.name.replace('.ndjson', '');
+                if (name < minKey) {
+                    await fs.rm(join(FLOW_ROOT, entry.name), { force: true });
+                }
+            })
+    );
+}
 
 export class FlowMonitor {
     constructor(maxEntries = 200) {
         this.maxEntries = maxEntries;
         this.flows = [];
         this.flowMap = new Map();
+        this.persistChain = Promise.resolve();
     }
 
     setMaxEntries(limit) {
@@ -59,6 +145,17 @@ export class FlowMonitor {
         flow.usage = payload.usage || null;
         flow.latencyMs = payload.latencyMs ?? null;
         flow.updatedAt = new Date().toISOString();
+
+        this.persistChain = this.persistChain
+            .catch(() => {})
+            .then(async () => {
+                try {
+                    await appendFlowRecord(serializeFlow(flow));
+                    await cleanupOldFlows();
+                } catch (error) {
+                    console.warn('[FlowMonitor] Failed to persist flow record:', error.message);
+                }
+            });
     }
 
     listFlows(limit = 50) {
@@ -97,3 +194,61 @@ export class FlowMonitor {
 
 export const flowMonitor = new FlowMonitor();
 
+export async function cleanupOldFlows(retentionDays = DEFAULT_RETENTION_DAYS) {
+    try {
+        await removeOldFiles(retentionDays);
+    } catch (error) {
+        console.warn('[FlowMonitor] cleanupOldFlows error:', error.message);
+    }
+}
+
+export async function readPersistedFlows({ days = 1, limit = 500, day } = {}) {
+    await ensureFlowDir();
+    const flows = [];
+    const dayKeys = [];
+
+    if (day) {
+        dayKeys.push(day);
+    } else {
+        const startDate = new Date();
+        for (let i = 0; i < days; i += 1) {
+            const d = new Date(startDate);
+            d.setDate(startDate.getDate() - i);
+            dayKeys.push(formatDayKey(d));
+        }
+    }
+
+    for (const key of dayKeys) {
+        if (flows.length >= limit) break;
+        const filePath = getFlowLogPath(key);
+        if (!existsSync(filePath)) continue;
+        try {
+            const contents = await fs.readFile(filePath, 'utf-8');
+            const lines = contents.trim().split('\n').filter(Boolean);
+            for (let i = lines.length - 1; i >= 0; i -= 1) {
+                try {
+                    flows.push(JSON.parse(lines[i]));
+                } catch {
+                    // skip malformed line
+                }
+                if (flows.length >= limit) break;
+            }
+        } catch (error) {
+            console.warn(`[FlowMonitor] Failed to read ${filePath}:`, error.message);
+        }
+    }
+
+    return flows;
+}
+
+export function getFlowLogDirectory() {
+    return FLOW_ROOT;
+}
+
+export function getDailyLogPath(day) {
+    return getFlowLogPath(day);
+}
+
+export function formatFlowDayKey(input = new Date()) {
+    return formatDayKey(input);
+}

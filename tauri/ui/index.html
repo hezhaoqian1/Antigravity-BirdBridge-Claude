@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Antigravity Desktop</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+
+<body>
+  <main class="shell">
+    <header>
+      <h1>Antigravity Desktop</h1>
+      <p class="subtitle">Control Antigravity → Claude proxy from a native app.</p>
+    </header>
+
+    <section class="status-card">
+      <div id="status-indicator" class="indicator indicator-idle"></div>
+      <div>
+        <p id="status-text" class="status-text">Proxy stopped</p>
+        <small id="status-meta" class="status-meta">Port — · Account —</small>
+      </div>
+    </section>
+
+    <section class="stats-grid">
+      <div>
+        <span class="label">Port</span>
+        <strong id="port-value">8080</strong>
+      </div>
+      <div>
+        <span class="label">LAN Access</span>
+        <strong id="lan-value">Disabled</strong>
+      </div>
+      <div>
+        <span class="label">Account</span>
+        <strong id="account-value">—</strong>
+      </div>
+      <div>
+        <span class="label">Last Update</span>
+        <strong id="updated-value">—</strong>
+      </div>
+    </section>
+
+    <section class="controls">
+      <button id="start-btn" class="primary">Start Proxy</button>
+      <button id="stop-btn" class="secondary" disabled>Stop Proxy</button>
+    </section>
+
+    <section class="actions">
+      <button id="dashboard-btn">Open Dashboard</button>
+      <button id="logs-btn">View Logs</button>
+      <button id="repair-btn">Reconfigure Claude CLI</button>
+    </section>
+
+    <section id="config-warning" class="warning hidden">
+      <strong>⚠ Claude CLI not configured.</strong>
+      <p>
+        settings.json @ <code id="config-path">~/.claude/settings.json</code>
+        does not point to this proxy. Click “Reconfigure” to fix automatically.
+      </p>
+    </section>
+
+    <section class="log-output">
+      <p class="label">Last Error</p>
+      <div id="error-box" class="error-box">None</div>
+    </section>
+  </main>
+
+  <script type="module" src="./main.js"></script>
+</body>
+
+</html>

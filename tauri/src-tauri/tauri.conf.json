@@ -1,0 +1,40 @@
+{
+  "package": {
+    "productName": "Antigravity Desktop",
+    "version": "0.1.0"
+  },
+  "tauri": {
+    "macOSPrivateApi": false,
+    "systemTray": {
+      "iconPath": "icons/tray-icon.png",
+      "iconAsTemplate": true
+    },
+    "windows": [
+      {
+        "title": "Antigravity Desktop",
+        "width": 500,
+        "height": 700,
+        "resizable": false,
+        "fullscreen": false
+      }
+    ],
+    "bundle": {
+      "identifier": "com.antigravity.desktop",
+      "icon": [
+        "icons/icon.icns",
+        "icons/icon.ico",
+        "icons/icon.png"
+      ],
+      "macOS": {
+        "signature": null,
+        "entitlements": null
+      }
+    }
+  },
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "devPath": "../ui",
+    "distDir": "../ui"
+  }
+}

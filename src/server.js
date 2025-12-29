@@ -8,6 +8,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createReadStream, existsSync } from 'fs';
 import { listModels, getModelQuotas } from './cloudcode-client.js';
 import { forceRefresh } from './token-extractor.js';
 import {
@@ -19,7 +20,7 @@ import {
 } from './constants.js';
 import { AccountManager } from './account-manager.js';
 import { formatDuration } from './utils/helpers.js';
-import { flowMonitor } from './flow-monitor.js';
+import { flowMonitor, readPersistedFlows, getDailyLogPath, formatFlowDayKey } from './flow-monitor.js';
 import { getConfig, updateConfig } from './services/config-service.js';
 import { createBackup, listBackups } from './services/backup-service.js';
 import { openAIChatToAnthropic, anthropicToOpenAIChat } from './utils/openai-adapter.js';
@@ -106,7 +107,8 @@ async function ensureInitialized() {
         try {
             await accountManager.initialize();
             isInitialized = true;
-            const status = accountManager.getStatus();
+            initError = null;
+            const status = statusSnapshot;
             console.log(`[Server] Account pool initialized: ${status.summary}`);
         } catch (error) {
             initError = error;
@@ -345,6 +347,10 @@ app.get('/account-limits', async (req, res) => {
         }
 
         const sortedModels = Array.from(allModelIds).filter(m => m.includes('claude')).sort();
+        const enrichedAccounts = accountLimits.map(acc => ({
+            ...acc,
+            meta: accountMeta.get(acc.email) || null
+        }));
 
         // Return ASCII table format
         if (format === 'table') {
@@ -444,13 +450,15 @@ app.get('/account-limits', async (req, res) => {
 
         // Default: JSON format
         res.json({
-            timestamp: new Date().toLocaleString(),
+            timestamp: new Date().toISOString(),
             totalAccounts: allAccounts.length,
             models: sortedModels,
-            accounts: accountLimits.map(acc => ({
+            recommendedAccount: statusSnapshot.recommendedAccount,
+            accounts: enrichedAccounts.map(acc => ({
                 email: acc.email,
                 status: acc.status,
                 error: acc.error || null,
+                meta: acc.meta,
                 limits: Object.fromEntries(
                     sortedModels.map(modelId => {
                         const quota = acc.models?.[modelId];
@@ -510,8 +518,56 @@ app.get('/api/providers', (req, res) => {
 /**
  * Flow monitor endpoints
  */
-app.get('/api/flows', (req, res) => {
+app.get('/api/flows', async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+    const exportMode = (req.query.export || '').toString();
+
+    if (exportMode === 'json') {
+        const days = Math.min(Math.max(parseInt(req.query.days, 10) || 1, 1), 7);
+        const persisted = await readPersistedFlows({ days, limit });
+        const inMemory = flowMonitor.listFlows(limit);
+
+        const dedup = new Map();
+        for (const entry of [...inMemory, ...persisted]) {
+            if (!entry?.id || dedup.has(entry.id)) continue;
+            dedup.set(entry.id, entry);
+        }
+
+        const combined = Array.from(dedup.values()).sort(
+            (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
+        ).slice(0, limit);
+
+        return res.json({
+            flows: combined,
+            source: { memory: inMemory.length, persisted: persisted.length }
+        });
+    }
+
+    if (exportMode === 'file') {
+        const dayKey = typeof req.query.day === 'string' && req.query.day.trim()
+            ? req.query.day.trim()
+            : formatFlowDayKey(new Date());
+        const filePath = getDailyLogPath(dayKey);
+        if (!existsSync(filePath)) {
+            return res.status(404).json({
+                error: `No flow log for ${dayKey}`
+            });
+        }
+
+        res.setHeader('Content-Type', 'application/x-ndjson');
+        res.setHeader('Content-Disposition', `attachment; filename="flows-${dayKey}.ndjson"`);
+        const stream = createReadStream(filePath);
+        stream.on('error', (error) => {
+            console.error('[Flows] Failed to stream log:', error.message);
+            if (!res.headersSent) {
+                res.status(500).json({ error: 'Failed to stream log file' });
+            } else {
+                res.end();
+            }
+        });
+        return stream.pipe(res);
+    }
+
     res.json({ flows: flowMonitor.listFlows(limit) });
 });
 
@@ -536,7 +592,7 @@ app.get('/api/admin/config', (req, res) => {
     res.json({ config: sanitizeConfig(getConfig()) });
 });
 
-app.post('/api/admin/config', (req, res) => {
+app.post('/api/admin/config', async (req, res) => {
     if (!requireAdminAuth(req, res)) return;
     const payload = req.body || {};
     const allowed = {};
@@ -552,6 +608,7 @@ app.post('/api/admin/config', (req, res) => {
     }
 
     const updated = updateConfig(allowed);
+    await createBackup('config-change').catch(() => {});
     flowMonitor.setMaxEntries(updated.maxFlowEntries || 200);
     res.json({
         status: 'ok',
@@ -881,5 +938,24 @@ app.use('/v1/*', (req, res) => {
 app.get('/', (req, res) => {
     res.redirect('/dashboard');
 });
+
+export function getRuntimeSnapshot() {
+    try {
+        const status = accountManager.getStatus();
+        return {
+            initialized: isInitialized,
+            initError: initError ? (initError.message || String(initError)) : null,
+            currentAccount: accountManager.getCurrentAccount()?.email || null,
+            status
+        };
+    } catch (error) {
+        return {
+            initialized: isInitialized,
+            initError: initError ? (initError.message || String(initError)) : error.message,
+            currentAccount: null,
+            status: null
+        };
+    }
+}
 
 export default app;
