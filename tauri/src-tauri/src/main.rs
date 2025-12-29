@@ -1,10 +1,10 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
 use std::{
     fs,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
 
@@ -13,16 +13,18 @@ use dirs::home_dir;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{
-    api::shell,
-    AppHandle, CustomMenuItem, Manager, State, SystemTray, SystemTrayEvent, SystemTrayMenu,
-    SystemTrayMenuItem,
+    AppHandle, Manager, State,
+    menu::{Menu, MenuItem},
+    tray::{TrayIcon, TrayIconBuilder},
+    Icon,
 };
-use tauri::async_runtime::{sleep, Mutex};
-use tauri::Icon;
+use tauri::async_runtime::Mutex;
+use tauri_plugin_shell::ShellExt;
 use tokio::{
     fs::OpenOptions,
     io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
     process::{Child, Command},
+    time::sleep,
 };
 
 #[derive(Clone)]
@@ -31,6 +33,7 @@ struct ProxyState {
     log_path: Arc<PathBuf>,
     child: Arc<Mutex<Option<Child>>>,
     status: Arc<Mutex<AppStatus>>,
+    tray: Arc<StdMutex<Option<TrayIcon>>>,
 }
 
 #[derive(Clone, Default)]
@@ -94,6 +97,7 @@ impl ProxyState {
             log_path: Arc::new(log_path),
             child: Arc::new(Mutex::new(None)),
             status: Arc::new(Mutex::new(AppStatus::default())),
+            tray: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -103,6 +107,12 @@ impl ProxyState {
 
     fn log_path(&self) -> &Path {
         &self.log_path
+    }
+
+    fn attach_tray(&self, tray: TrayIcon) {
+        if let Ok(mut guard) = self.tray.lock() {
+            *guard = Some(tray);
+        }
     }
 
     async fn append_log(&self, level: &str, line: &str) {
@@ -118,7 +128,7 @@ impl ProxyState {
         }
     }
 
-    async fn apply_event(&self, event: ProxyEvent, app: &AppHandle) {
+    async fn apply_event(&self, event: ProxyEvent) {
         {
             let mut status = self.status.lock().await;
             match event.event.as_str() {
@@ -137,77 +147,7 @@ impl ProxyState {
                 _ => {}
             }
         }
-
-        let _ = self.update_tray(app).await;
-    }
-
-    async fn update_tray(&self, app: &AppHandle) -> tauri::Result<()> {
-        let tray = app.tray_handle();
-        let status = self.status.lock().await.clone();
-        let has_rate_limit = status
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.get("accounts"))
-            .and_then(|accounts| accounts.as_array())
-            .map(|accounts| accounts.iter().any(|acc| acc.get("isRateLimited").and_then(|v| v.as_bool()).unwrap_or(false)))
-            .unwrap_or(false);
-        let icon = if status.running {
-            if has_rate_limit {
-                TrayVisual::Warning
-            } else {
-                TrayVisual::Running
-            }
-        } else if status.last_error.is_some() {
-            TrayVisual::Warning
-        } else {
-            TrayVisual::Stopped
-        };
-        tray.set_icon(icon.icon())?;
-
-        let tooltip = if status.running {
-            if let Some(snapshot) = status.snapshot {
-                let port = snapshot
-                    .get("port")
-                    .and_then(|p| p.as_i64())
-                    .unwrap_or(8080);
-                let account = snapshot
-                    .get("currentAccount")
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("unknown");
-                format!("Proxy running on :{port} · {account}")
-            } else {
-                "Proxy running".to_string()
-            }
-        } else if let Some(err) = status.last_error {
-            err
-        } else if has_rate_limit {
-            if let Some(soonest) = status
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.get("accounts"))
-                .and_then(|accounts| accounts.as_array())
-                .and_then(|accounts| {
-                    accounts
-                        .iter()
-                        .filter_map(|acc| acc.get("nextAvailableAt").and_then(|v| v.as_i64()))
-                        .min()
-                })
-            {
-                let remaining = soonest - chrono::Utc::now().timestamp_millis();
-                if remaining > 0 {
-                    format!("Rate limited · next slot in {}", format_duration(remaining as u64))
-                } else {
-                    "Rate limited · retrying".to_string()
-                }
-            } else {
-                "Rate limited".to_string()
-            }
-        } else {
-            "Proxy stopped".to_string()
-        };
-
-        tray.set_tooltip(&tooltip)?;
-        Ok(())
+        let _ = self.update_tray().await;
     }
 
     async fn current_status(&self) -> UiStatus {
@@ -260,15 +200,92 @@ impl ProxyState {
         }
     }
 
-    async fn mark_stopped(&self, message: Option<&str>, app: &AppHandle) {
-        {
-            let mut status = self.status.lock().await;
-            status.running = false;
-            status.last_error = message.map(|m| m.to_string());
-            status.last_update = Some(now_string());
-        }
-        let _ = self.update_tray(app).await;
+    async fn mark_stopped(&self, message: Option<&str>) {
+        let mut status = self.status.lock().await;
+        status.running = false;
+        status.last_error = message.map(|m| m.to_string());
+        status.last_update = Some(now_string());
+        drop(status);
+        let _ = self.update_tray().await;
     }
+
+    async fn update_tray(&self) -> tauri::Result<()> {
+        let status = self.status.lock().await.clone();
+        let has_rate_limit = status
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.get("accounts"))
+            .and_then(|accounts| accounts.as_array())
+            .map(|accounts| {
+                accounts.iter().any(|acc| {
+                    acc.get("isRateLimited")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+
+        let visual = if status.running {
+            if has_rate_limit {
+                TrayVisual::Warning
+            } else {
+                TrayVisual::Running
+            }
+        } else if status.last_error.is_some() {
+            TrayVisual::Warning
+        } else {
+            TrayVisual::Stopped
+        };
+
+        let tooltip = if status.running {
+            if let Some(snapshot) = status.snapshot.as_ref() {
+                let port = snapshot
+                    .get("port")
+                    .and_then(|p| p.as_i64())
+                    .unwrap_or(8080);
+                let account = snapshot
+                    .get("currentAccount")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("unknown");
+                format!("Proxy running on :{port} · {account}")
+            } else {
+                "Proxy running".to_string()
+            }
+        } else if let Some(err) = status.last_error.clone() {
+            err
+        } else if let Some(wait_ms) = status
+            .snapshot
+            .as_ref()
+            .and_then(shortest_wait_ms)
+            .filter(|ms| *ms > 0)
+        {
+            format!(
+                "Rate limited · next slot in {}",
+                format_duration(wait_ms as u64)
+            )
+        } else {
+            "Proxy stopped".to_string()
+        };
+
+        if let Ok(mut guard) = self.tray.lock() {
+            if let Some(tray) = guard.as_ref() {
+                tray.set_icon(visual.icon())?;
+                tray.set_tooltip(&tooltip)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn shortest_wait_ms(snapshot: &Value) -> Option<i64> {
+    let accounts = snapshot.get("accounts")?.as_array()?;
+    let now = Utc::now().timestamp_millis();
+    accounts
+        .iter()
+        .filter_map(|acc| acc.get("nextAvailableAt").and_then(|v| v.as_i64()))
+        .map(|ts| ts - now)
+        .filter(|delta| *delta > 0)
+        .min()
 }
 
 enum TrayVisual {
@@ -289,7 +306,7 @@ impl TrayVisual {
 }
 
 fn icon_from_color(color: [u8; 3]) -> Icon {
-    let size = 20usize;
+    let size = 24usize;
     let mut data = vec![0u8; size * size * 4];
     for px in data.chunks_exact_mut(4) {
         px[0] = color[0];
@@ -299,12 +316,8 @@ fn icon_from_color(color: [u8; 3]) -> Icon {
     }
     Icon::Raw(
         tauri::image::Image::from_rgba(size as u32, size as u32, data)
-            .expect("icon buffer"),
+            .expect("failed to build tray icon"),
     )
-}
-
-fn now_string() -> String {
-    Utc::now().to_rfc3339()
 }
 
 fn format_duration(ms: u64) -> String {
@@ -318,7 +331,11 @@ fn format_duration(ms: u64) -> String {
     }
 }
 
-fn spawn_line_reader<R>(state: ProxyState, app: AppHandle, reader: R, label: &'static str)
+fn now_string() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn spawn_line_reader<R>(state: ProxyState, reader: R, label: &'static str)
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -328,27 +345,24 @@ where
             state.append_log(label, &line).await;
             if label == "STDOUT" {
                 if let Ok(event) = serde_json::from_str::<ProxyEvent>(&line) {
-                    state.apply_event(event, &app).await;
+                    state.apply_event(event).await;
                 }
             } else {
                 state
-                    .apply_event(
-                        ProxyEvent {
-                            event: "error".to_string(),
-                            phase: None,
-                            snapshot: None,
-                            message: Some(line.clone()),
-                            reason: None,
-                        },
-                        &app,
-                    )
+                    .apply_event(ProxyEvent {
+                        event: "error".to_string(),
+                        phase: None,
+                        snapshot: None,
+                        message: Some(line.clone()),
+                        reason: None,
+                    })
                     .await;
             }
         }
     });
 }
 
-fn spawn_watchdog(app: AppHandle, state: ProxyState) {
+fn spawn_watchdog(state: ProxyState) {
     tauri::async_runtime::spawn(async move {
         loop {
             let exited = {
@@ -361,9 +375,7 @@ fn spawn_watchdog(app: AppHandle, state: ProxyState) {
                         }
                         Ok(None) => false,
                         Err(err) => {
-                            state
-                                .append_log("ERROR", &format!("watchdog: {err}"))
-                                .await;
+                            state.append_log("ERROR", &format!("watchdog: {err}")).await;
                             false
                         }
                     }
@@ -373,7 +385,7 @@ fn spawn_watchdog(app: AppHandle, state: ProxyState) {
             };
 
             if exited {
-                state.mark_stopped(Some("Proxy process exited"), &app).await;
+                state.mark_stopped(Some("Proxy process exited")).await;
                 break;
             }
 
@@ -382,7 +394,7 @@ fn spawn_watchdog(app: AppHandle, state: ProxyState) {
     });
 }
 
-async fn start_proxy_impl(app: &AppHandle, state: &ProxyState) -> Result<UiStatus, String> {
+async fn start_proxy_impl(state: &ProxyState) -> Result<UiStatus, String> {
     let mut guard = state.child.lock().await;
     if guard.is_some() {
         drop(guard);
@@ -408,17 +420,17 @@ async fn start_proxy_impl(app: &AppHandle, state: &ProxyState) -> Result<UiStatu
     let mut child = command.spawn().map_err(|err| err.to_string())?;
 
     if let Some(stdout) = child.stdout.take() {
-        spawn_line_reader(state.clone(), app.clone(), stdout, "STDOUT");
+        spawn_line_reader(state.clone(), stdout, "STDOUT");
     }
 
     if let Some(stderr) = child.stderr.take() {
-        spawn_line_reader(state.clone(), app.clone(), stderr, "STDERR");
+        spawn_line_reader(state.clone(), stderr, "STDERR");
     }
 
     *guard = Some(child);
     drop(guard);
 
-    spawn_watchdog(app.clone(), state.clone());
+    spawn_watchdog(state.clone());
 
     {
         let mut status = state.status.lock().await;
@@ -426,14 +438,14 @@ async fn start_proxy_impl(app: &AppHandle, state: &ProxyState) -> Result<UiStatu
         status.last_error = None;
         status.last_update = Some(now_string());
     }
-    let _ = state.update_tray(app).await;
+    let _ = state.update_tray().await;
 
     let mut ui = state.current_status().await;
     ui.config = state.claude_config_status().await;
     Ok(ui)
 }
 
-async fn stop_proxy_impl(app: &AppHandle, state: &ProxyState) -> Result<UiStatus, String> {
+async fn stop_proxy_impl(state: &ProxyState) -> Result<UiStatus, String> {
     {
         let mut guard = state.child.lock().await;
         if let Some(mut child) = guard.take() {
@@ -461,7 +473,7 @@ async fn stop_proxy_impl(app: &AppHandle, state: &ProxyState) -> Result<UiStatus
         }
     }
 
-    state.mark_stopped(None, app).await;
+    state.mark_stopped(None).await;
     let mut ui = state.current_status().await;
     ui.config = state.claude_config_status().await;
     Ok(ui)
@@ -476,7 +488,7 @@ async fn open_dashboard_impl(app: &AppHandle, state: &ProxyState) -> Result<(), 
         .unwrap_or(8080);
     drop(status);
     let url = format!("http://localhost:{port}/dashboard");
-    shell::open(&app.shell_scope(), url, None).map_err(|err| err.to_string())
+    app.shell().open(&url, None).map_err(|err: tauri_plugin_shell::Error| err.to_string())
 }
 
 async fn view_logs_impl(app: &AppHandle, state: &ProxyState) -> Result<(), String> {
@@ -487,18 +499,20 @@ async fn view_logs_impl(app: &AppHandle, state: &ProxyState) -> Result<(), Strin
         }
         fs::File::create(&path).map_err(|err| err.to_string())?;
     }
-    shell::open(&app.shell_scope(), path.to_string_lossy().to_string(), None)
-        .map_err(|err| err.to_string())
+    let path_str = path.to_string_lossy().to_string();
+    app.shell()
+        .open(&path_str, None)
+        .map_err(|err: tauri_plugin_shell::Error| err.to_string())
 }
 
 #[tauri::command]
-async fn start_proxy(app: AppHandle, state: State<'_, ProxyState>) -> Result<UiStatus, String> {
-    start_proxy_impl(&app, &state).await
+async fn start_proxy(state: State<'_, ProxyState>) -> Result<UiStatus, String> {
+    start_proxy_impl(&state).await
 }
 
 #[tauri::command]
-async fn stop_proxy(app: AppHandle, state: State<'_, ProxyState>) -> Result<UiStatus, String> {
-    stop_proxy_impl(&app, &state).await
+async fn stop_proxy(state: State<'_, ProxyState>) -> Result<UiStatus, String> {
+    stop_proxy_impl(&state).await
 }
 
 #[tauri::command]
@@ -531,19 +545,10 @@ async fn check_claude_config(state: State<'_, ProxyState>) -> Result<ClaudeConfi
         .ok_or_else(|| "Unable to read Claude settings".to_string())
 }
 
-fn main() {
-    let tray_menu = SystemTrayMenu::new()
-        .add_item(CustomMenuItem::new("start-proxy", "Start Proxy"))
-        .add_item(CustomMenuItem::new("stop-proxy", "Stop Proxy"))
-        .add_native_item(SystemTrayMenuItem::Separator)
-        .add_item(CustomMenuItem::new("open-dashboard", "Open Dashboard"))
-        .add_item(CustomMenuItem::new("view-logs", "View Logs"))
-        .add_native_item(SystemTrayMenuItem::Separator)
-        .add_item(CustomMenuItem::new("quit-app", "Quit"));
-
-    let system_tray = SystemTray::new().with_menu(tray_menu);
-
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .manage(ProxyState::new())
         .invoke_handler(tauri::generate_handler![
             start_proxy,
@@ -554,39 +559,65 @@ fn main() {
             repair_claude_config,
             check_claude_config
         ])
-        .system_tray(system_tray)
-        .on_system_tray_event(|app, event| {
-            if let SystemTrayEvent::MenuItemClick { id, .. } = event {
-                let proxy = app.state::<ProxyState>().clone();
-                let handle = app.handle();
-                match id.as_str() {
-                    "start-proxy" => {
-                        tauri::async_runtime::spawn(async move {
-                            let _ = start_proxy_impl(&handle, &proxy).await;
-                        });
+        .setup(|app| {
+            let state = app.state::<ProxyState>().inner().clone();
+            let handle = app.handle().clone();
+
+            // Create tray menu
+            let start_i = MenuItem::with_id(app, "start-proxy", "Start Proxy", true, None::<&str>)?;
+            let stop_i = MenuItem::with_id(app, "stop-proxy", "Stop Proxy", true, None::<&str>)?;
+            let dashboard_i = MenuItem::with_id(app, "open-dashboard", "Open Dashboard", true, None::<&str>)?;
+            let logs_i = MenuItem::with_id(app, "view-logs", "View Logs", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit-app", "Quit", true, None::<&str>)?;
+
+            let menu = Menu::with_items(app, &[&start_i, &stop_i, &dashboard_i, &logs_i, &quit_i])?;
+
+            let tray = TrayIconBuilder::new()
+                .menu(&menu)
+                .on_menu_event(move |app, event| {
+                    let state_clone = state.clone();
+                    let handle_clone = app.clone();
+                    match event.id.as_ref() {
+                        "start-proxy" => {
+                            tauri::async_runtime::spawn(async move {
+                                let _ = start_proxy_impl(&state_clone).await;
+                            });
+                        }
+                        "stop-proxy" => {
+                            tauri::async_runtime::spawn(async move {
+                                let _ = stop_proxy_impl(&state_clone).await;
+                            });
+                        }
+                        "open-dashboard" => {
+                            tauri::async_runtime::spawn(async move {
+                                let _ = open_dashboard_impl(&handle_clone, &state_clone).await;
+                            });
+                        }
+                        "view-logs" => {
+                            tauri::async_runtime::spawn(async move {
+                                let _ = view_logs_impl(&handle_clone, &state_clone).await;
+                            });
+                        }
+                        "quit-app" => {
+                            app.exit(0);
+                        }
+                        _ => {}
                     }
-                    "stop-proxy" => {
-                        tauri::async_runtime::spawn(async move {
-                            let _ = stop_proxy_impl(&handle, &proxy).await;
-                        });
-                    }
-                    "open-dashboard" => {
-                        tauri::async_runtime::spawn(async move {
-                            let _ = open_dashboard_impl(&handle, &proxy).await;
-                        });
-                    }
-                    "view-logs" => {
-                        tauri::async_runtime::spawn(async move {
-                            let _ = view_logs_impl(&handle, &proxy).await;
-                        });
-                    }
-                    "quit-app" => {
-                        app.exit(0);
-                    }
-                    _ => {}
-                }
-            }
+                })
+                .build(app)?;
+            state.attach_tray(tray);
+
+            let state_for_tray = state.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = state_for_tray.update_tray().await;
+            });
+
+            Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn main() {
+    run();
 }

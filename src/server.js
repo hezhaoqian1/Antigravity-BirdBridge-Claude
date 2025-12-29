@@ -43,6 +43,16 @@ let isInitialized = false;
 let initError = null;
 let initPromise = null;
 
+// Helper to get current status snapshot
+function getStatusSnapshot() {
+    const status = accountManager.getStatus();
+    return {
+        summary: `${status.available}/${status.total} available`,
+        recommendedAccount: status.recommendedAccount,
+        accounts: status.accounts
+    };
+}
+
 const ADMIN_HEADER = 'x-admin-key';
 
 function hasValidAdminKey(req) {
@@ -108,7 +118,7 @@ async function ensureInitialized() {
             await accountManager.initialize();
             isInitialized = true;
             initError = null;
-            const status = statusSnapshot;
+            const status = getStatusSnapshot();
             console.log(`[Server] Account pool initialized: ${status.summary}`);
         } catch (error) {
             initError = error;
@@ -216,7 +226,8 @@ function parseError(error, accountManager = null) {
             const minutes = parseInt(resetMatch[3] || '0', 10);
             const seconds = parseInt(resetMatch[4] || resetMatch[5] || '0', 10);
             retryAfterSeconds = hours * 3600 + minutes * 60 + seconds;
-            errorMessage = `You have exhausted your capacity on ${model}. Quota will reset after ${resetMatch[0]}.`;
+            const durationText = resetMatch[0].replace(/quota will reset after\s*/i, '');
+            errorMessage = `You have exhausted your capacity on ${model}. Quota will reset after ${durationText}.`;
         } else {
             // Try to get from account manager if provided
             if (accountManager && accountManager.isAllRateLimited()) {
@@ -347,9 +358,29 @@ app.get('/account-limits', async (req, res) => {
         }
 
         const sortedModels = Array.from(allModelIds).filter(m => m.includes('claude')).sort();
+
+        // Get account meta from accountManager status
+        const accountStatus = accountManager.getStatus();
+        const accountMetaMap = new Map(
+            (accountStatus.accounts || []).map(acc => [
+                acc.email,
+                {
+                    isRateLimited: acc.isRateLimited,
+                    rateLimitResetTime: acc.rateLimitResetTime,
+                    nextAvailableAt: acc.nextAvailableAt ?? (acc.isRateLimited ? acc.rateLimitResetTime : null),
+                    isInvalid: acc.isInvalid || false,
+                    invalidReason: acc.invalidReason || null,
+                    lastUsed: acc.lastUsed || null,
+                    stats: acc.stats,
+                    healthScore: acc.healthScore,
+                    recommended: acc.recommended
+                }
+            ])
+        );
+
         const enrichedAccounts = accountLimits.map(acc => ({
             ...acc,
-            meta: accountMeta.get(acc.email) || null
+            meta: accountMetaMap.get(acc.email) || null
         }));
 
         // Return ASCII table format
@@ -449,11 +480,12 @@ app.get('/account-limits', async (req, res) => {
         }
 
         // Default: JSON format
+        const snapshot = getStatusSnapshot();
         res.json({
             timestamp: new Date().toISOString(),
             totalAccounts: allAccounts.length,
             models: sortedModels,
-            recommendedAccount: statusSnapshot.recommendedAccount,
+            recommendedAccount: snapshot.recommendedAccount,
             accounts: enrichedAccounts.map(acc => ({
                 email: acc.email,
                 status: acc.status,

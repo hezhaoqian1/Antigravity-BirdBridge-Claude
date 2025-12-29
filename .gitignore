@@ -28,3 +28,9 @@ tests/utils/*.jpeg
 # Build output
 dist/
 build/
+
+# Desktop build artifacts
+Antigravity\ Desktop.app/
+Antigravity-Desktop.zip
+tauri/src-tauri/target/
+tauri/src-tauri/gen/

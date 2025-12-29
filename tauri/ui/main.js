@@ -1,116 +1,225 @@
-const { tauri } = window.__TAURI__ || {}
+// Wait for Tauri to be ready
+const invoke = async (...args) => {
+  // Try to get invoke from __TAURI__
+  const tauri = window.__TAURI__;
+  if (tauri?.core?.invoke) {
+    return tauri.core.invoke(...args);
+  }
+  if (tauri?.invoke) {
+    return tauri.invoke(...args);
+  }
+  // Fallback for older API
+  if (tauri?.tauri?.invoke) {
+    return tauri.tauri.invoke(...args);
+  }
+  throw new Error('Tauri API not available');
+};
 
-const $ = (id) => document.getElementById(id)
+const $ = (id) => document.getElementById(id);
 
-const indicatorEl = $('status-indicator')
-const statusTextEl = $('status-text')
-const statusMetaEl = $('status-meta')
-const portEl = $('port-value')
-const lanEl = $('lan-value')
-const accountEl = $('account-value')
-const updatedEl = $('updated-value')
-const errorEl = $('error-box')
-const configWarningEl = $('config-warning')
-const configPathEl = $('config-path')
-const startBtn = $('start-btn')
-const stopBtn = $('stop-btn')
-const dashboardBtn = $('dashboard-btn')
-const logsBtn = $('logs-btn')
-const repairBtn = $('repair-btn')
-
-const invoke = (...args) => tauri?.invoke?.(...args)
+// Element references
+const indicatorEl = $('status-indicator');
+const statusTextEl = $('status-text');
+const statusMetaEl = $('status-meta');
+const portEl = $('port-value');
+const lanEl = $('lan-value');
+const accountEl = $('account-value');
+const updatedEl = $('updated-value');
+const errorEl = $('error-box');
+const errorIndicatorEl = $('error-indicator');
+const configWarningEl = $('config-warning');
+const configPathEl = $('config-path');
+const startBtn = $('start-btn');
+const stopBtn = $('stop-btn');
+const dashboardBtn = $('dashboard-btn');
+const logsBtn = $('logs-btn');
+const repairBtn = $('repair-btn');
 
 function setIndicator(state) {
-  indicatorEl.classList.remove('indicator-running', 'indicator-idle', 'indicator-warning')
+  if (!indicatorEl) return;
+  indicatorEl.classList.remove('indicator-running', 'indicator-idle', 'indicator-warning');
   indicatorEl.classList.add({
     running: 'indicator-running',
     warning: 'indicator-warning',
     idle: 'indicator-idle',
-  }[state] || 'indicator-idle')
+  }[state] || 'indicator-idle');
 }
 
 function formatDate(value) {
-  if (!value) return '—'
-  const dt = new Date(value)
-  return dt.toLocaleTimeString()
+  if (!value) return '—';
+  const dt = new Date(value);
+  if (isNaN(dt.getTime())) return '—';
+  return dt.toLocaleTimeString();
+}
+
+function formatAccount(email) {
+  if (!email || email === '—') return '—';
+  // Truncate long emails for display
+  if (email.length > 20) {
+    const parts = email.split('@');
+    if (parts.length === 2) {
+      const name = parts[0].slice(0, 8);
+      const domain = parts[1].slice(0, 8);
+      return `${name}...@${domain}...`;
+    }
+    return email.slice(0, 18) + '...';
+  }
+  return email;
 }
 
 function setBusy(isBusy) {
-  startBtn.disabled = isBusy
-  stopBtn.disabled = isBusy
-  repairBtn.disabled = isBusy
+  if (startBtn) startBtn.disabled = isBusy;
+  if (stopBtn) stopBtn.disabled = isBusy;
+  if (repairBtn) repairBtn.disabled = isBusy;
+  if (dashboardBtn) dashboardBtn.disabled = isBusy;
+}
+
+function setError(message) {
+  if (errorEl) {
+    const hasError = message && message !== 'None' && message !== 'Ready';
+    errorEl.textContent = message || 'Ready';
+    errorEl.classList.toggle('has-error', hasError);
+    if (errorIndicatorEl) {
+      errorIndicatorEl.classList.toggle('hidden', !hasError);
+    }
+  }
 }
 
 function updateUI(status) {
-  const running = !!status.running
-  const hasError = Boolean(status.last_error)
-  setIndicator(running ? 'running' : hasError ? 'warning' : 'idle')
-  statusTextEl.textContent = running ? 'Proxy running' : 'Proxy stopped'
-  statusMetaEl.textContent = status.snapshot
-    ? `Port ${status.snapshot.port ?? '—'} · ${
-        status.snapshot.currentAccount || 'Account —'
-      }`
-    : 'Port — · Account —'
+  // Handle null/undefined status
+  if (!status) {
+    setIndicator('idle');
+    if (statusTextEl) statusTextEl.textContent = 'Loading...';
+    if (statusMetaEl) statusMetaEl.textContent = 'Initializing...';
+    return;
+  }
 
-  portEl.textContent = status.snapshot?.port ?? '—'
-  lanEl.textContent = status.snapshot?.lanEnabled ? 'Enabled' : 'Disabled'
-  accountEl.textContent = status.snapshot?.currentAccount ?? '—'
-  updatedEl.textContent = formatDate(status.last_update)
-  errorEl.textContent = status.last_error || 'None'
-  startBtn.disabled = running
-  stopBtn.disabled = !running
+  const running = !!status.running;
+  const hasError = Boolean(status.last_error);
+  setIndicator(running ? 'running' : hasError ? 'warning' : 'idle');
 
-  const configStatus = status.config
-  if (configStatus && !configStatus.healthy) {
-    configWarningEl.classList.remove('hidden')
-    configPathEl.textContent = configStatus.settings_path || '~/.claude/settings.json'
-  } else {
-    configWarningEl.classList.add('hidden')
+  if (statusTextEl) {
+    statusTextEl.textContent = running ? 'Proxy Running' : 'Proxy Stopped';
+  }
+
+  if (statusMetaEl) {
+    const port = status.snapshot?.port ?? '—';
+    const account = status.snapshot?.currentAccount || 'No Account';
+    statusMetaEl.textContent = status.snapshot
+      ? `Port ${port} · ${account}`
+      : 'Not started';
+  }
+
+  if (portEl) portEl.textContent = status.snapshot?.port ?? '8080';
+  if (lanEl) {
+    const lanEnabled = status.snapshot?.lanEnabled;
+    lanEl.textContent = lanEnabled ? 'Enabled' : 'Disabled';
+    lanEl.style.color = lanEnabled ? '#f59e0b' : '';
+  }
+  if (accountEl) accountEl.textContent = formatAccount(status.snapshot?.currentAccount);
+  if (updatedEl) updatedEl.textContent = formatDate(status.last_update);
+
+  // Update error display
+  setError(status.last_error || (running ? 'Proxy running normally' : 'Ready'));
+
+  // Update button states
+  if (startBtn) startBtn.disabled = running;
+  if (stopBtn) stopBtn.disabled = !running;
+
+  // Config warning
+  const configStatus = status.config;
+  if (configWarningEl) {
+    if (configStatus && !configStatus.healthy) {
+      configWarningEl.classList.remove('hidden');
+      if (configPathEl) configPathEl.textContent = configStatus.settings_path || '~/.claude/settings.json';
+    } else {
+      configWarningEl.classList.add('hidden');
+    }
   }
 }
 
 async function refreshStatus() {
   try {
-    const status = await invoke('fetch_status')
-    updateUI(status)
+    const status = await invoke('fetch_status');
+    updateUI(status);
   } catch (error) {
-    console.error(error)
-    errorEl.textContent = error?.message || String(error)
+    console.error('Failed to fetch status:', error);
+    setError(error?.message || String(error));
+    updateUI(null);
   }
 }
 
-async function guarded(action) {
-  setBusy(true)
+async function guarded(action, successMessage) {
+  setBusy(true);
   try {
-    await action()
-    await refreshStatus()
+    await action();
+    if (successMessage) {
+      setError(successMessage);
+    }
+    await refreshStatus();
   } catch (error) {
-    console.error(error)
-    errorEl.textContent = error?.message || String(error)
+    console.error(error);
+    setError(error?.message || String(error));
   } finally {
-    setBusy(false)
+    setBusy(false);
   }
 }
 
-startBtn.addEventListener('click', () =>
-  guarded(() => invoke('start_proxy'))
-)
-stopBtn.addEventListener('click', () =>
-  guarded(() => invoke('stop_proxy'))
-)
-dashboardBtn.addEventListener('click', () =>
-  invoke('open_dashboard').catch((error) => {
-    errorEl.textContent = error?.message || String(error)
-  })
-)
-logsBtn.addEventListener('click', () =>
-  invoke('view_logs').catch((error) => {
-    errorEl.textContent = error?.message || String(error)
-  })
-)
-repairBtn.addEventListener('click', () =>
-  guarded(() => invoke('repair_claude_config'))
-)
+// Event listeners with null checks
+if (startBtn) {
+  startBtn.addEventListener('click', () =>
+    guarded(() => invoke('start_proxy'), 'Proxy started successfully')
+  );
+}
 
-refreshStatus()
-setInterval(refreshStatus, 5000)
+if (stopBtn) {
+  stopBtn.addEventListener('click', () =>
+    guarded(() => invoke('stop_proxy'), 'Proxy stopped')
+  );
+}
+
+if (dashboardBtn) {
+  dashboardBtn.addEventListener('click', async () => {
+    try {
+      await invoke('open_dashboard');
+    } catch (error) {
+      setError(error?.message || String(error));
+    }
+  });
+}
+
+if (logsBtn) {
+  logsBtn.addEventListener('click', async () => {
+    try {
+      await invoke('view_logs');
+    } catch (error) {
+      setError(error?.message || String(error));
+    }
+  });
+}
+
+if (repairBtn) {
+  repairBtn.addEventListener('click', () =>
+    guarded(() => invoke('repair_claude_config'), 'Claude CLI configured successfully')
+  );
+}
+
+// Initial load with retry
+function initApp() {
+  // Set initial loading state
+  if (statusTextEl) statusTextEl.textContent = 'Connecting...';
+  if (statusMetaEl) statusMetaEl.textContent = 'Waiting for Tauri...';
+
+  // Wait a bit for Tauri to be ready
+  setTimeout(() => {
+    refreshStatus();
+    setInterval(refreshStatus, 5000);
+  }, 200);
+}
+
+// Start when DOM is ready
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initApp);
+} else {
+  initApp();
+}

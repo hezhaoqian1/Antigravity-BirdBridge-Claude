@@ -30,7 +30,17 @@ async function ensureFlowDir() {
 }
 
 function getFlowLogPath(dayLike = new Date()) {
-    const key = typeof dayLike === 'string' ? dayLike : formatDayKey(dayLike);
+    let key;
+    if (typeof dayLike === 'string') {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(dayLike)) {
+            key = dayLike;
+        } else {
+            const dateObj = new Date(dayLike);
+            key = Number.isNaN(dateObj.getTime()) ? formatDayKey(new Date()) : formatDayKey(dateObj);
+        }
+    } else {
+        key = formatDayKey(dayLike);
+    }
     return join(FLOW_ROOT, `${key}.ndjson`);
 }
 
