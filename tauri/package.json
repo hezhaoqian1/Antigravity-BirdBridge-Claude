@@ -4,6 +4,8 @@
   "description": "Tauri desktop shell for Antigravity Claude Proxy",
   "type": "module",
   "scripts": {
+    "pretauri:dev": "node ./scripts/sync-backend.mjs",
+    "pretauri:build": "node ./scripts/sync-backend.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:icon": "tauri icon icon-source.png"

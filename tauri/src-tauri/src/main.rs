@@ -1,7 +1,7 @@
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex as StdMutex},
@@ -16,7 +16,6 @@ use tauri::{
     AppHandle, Manager, State,
     menu::{Menu, MenuItem},
     tray::{TrayIcon, TrayIconBuilder},
-    Icon,
 };
 use tauri::async_runtime::Mutex;
 use tauri_plugin_shell::ShellExt;
@@ -77,11 +76,7 @@ struct UiStatus {
 
 impl ProxyState {
     fn new() -> Self {
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
+        let repo_root = detect_repo_root();
 
         let log_path = home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -180,7 +175,7 @@ impl ProxyState {
     }
 
     async fn run_node_script(&self, relative: &str) -> Result<String, String> {
-        let node_bin = std::env::var("NODE_BINARY").unwrap_or_else(|_| "node".into());
+        let node_bin = resolve_node_binary()?;
         let script_path = self.repo_root().join(relative);
         if !script_path.exists() {
             return Err(format!("Script not found: {}", script_path.display()));
@@ -267,10 +262,10 @@ impl ProxyState {
             "Proxy stopped".to_string()
         };
 
-        if let Ok(mut guard) = self.tray.lock() {
+        if let Ok(guard) = self.tray.lock() {
             if let Some(tray) = guard.as_ref() {
-                tray.set_icon(visual.icon())?;
-                tray.set_tooltip(&tooltip)?;
+                tray.set_icon(Some(visual.icon()))?;
+                tray.set_tooltip(Some(tooltip.as_str()))?;
             }
         }
         Ok(())
@@ -295,7 +290,7 @@ enum TrayVisual {
 }
 
 impl TrayVisual {
-    fn icon(&self) -> Icon {
+    fn icon(&self) -> tauri::image::Image<'static> {
         let color = match self {
             TrayVisual::Running => [16, 185, 129],
             TrayVisual::Warning => [251, 191, 36],
@@ -305,7 +300,7 @@ impl TrayVisual {
     }
 }
 
-fn icon_from_color(color: [u8; 3]) -> Icon {
+fn icon_from_color(color: [u8; 3]) -> tauri::image::Image<'static> {
     let size = 24usize;
     let mut data = vec![0u8; size * size * 4];
     for px in data.chunks_exact_mut(4) {
@@ -314,10 +309,7 @@ fn icon_from_color(color: [u8; 3]) -> Icon {
         px[2] = color[2];
         px[3] = 255;
     }
-    Icon::Raw(
-        tauri::image::Image::from_rgba(size as u32, size as u32, data)
-            .expect("failed to build tray icon"),
-    )
+    tauri::image::Image::new_owned(data, size as u32, size as u32)
 }
 
 fn format_duration(ms: u64) -> String {
@@ -333,6 +325,158 @@ fn format_duration(ms: u64) -> String {
 
 fn now_string() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn detect_repo_root() -> PathBuf {
+    if let Ok(explicit_root) = env::var("ANTIGRAVITY_DESKTOP_ROOT") {
+        let candidate = PathBuf::from(explicit_root);
+        if repo_assets_present(&candidate) {
+            return candidate;
+        }
+    }
+
+    if let Ok(exe_path) = env::current_exe() {
+        if let Some(resources_dir) = exe_path
+            .parent()
+            .and_then(|macos_dir| macos_dir.parent())
+            .map(|contents_dir| contents_dir.join("Resources"))
+        {
+            let bundled_app_dir = resources_dir.join("resources").join("app");
+            if repo_assets_present(&bundled_app_dir) {
+                return bundled_app_dir;
+            }
+
+            let app_dir = resources_dir.join("app");
+            if repo_assets_present(&app_dir) {
+                return app_dir;
+            }
+            if repo_assets_present(&resources_dir) {
+                return resources_dir;
+            }
+        }
+
+        let mut cursor = exe_path.as_path();
+        while let Some(parent) = cursor.parent() {
+            let candidate = parent.to_path_buf();
+            if repo_assets_present(&candidate) {
+                return candidate;
+            }
+            cursor = parent;
+        }
+    }
+
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn repo_assets_present(path: &Path) -> bool {
+    path.join("desktop/proxy-daemon.js").exists()
+        && path.join("src/index.js").exists()
+        && path.join("package.json").exists()
+}
+
+fn resolve_node_binary() -> Result<PathBuf, String> {
+    if let Ok(override_bin) = env::var("NODE_BINARY") {
+        let expanded = expand_tilde(&override_bin);
+        if expanded.is_absolute() {
+            if expanded.is_file() {
+                return Ok(expanded);
+            }
+            return Err(format!(
+                "NODE_BINARY points to '{}' but it does not exist",
+                expanded.display()
+            ));
+        }
+        if let Some(found) = search_in_path(&override_bin) {
+            return Ok(found);
+        }
+        return Err(format!(
+            "NODE_BINARY is set to '{override_bin}' but it was not found on PATH"
+        ));
+    }
+
+    if let Some(found) = search_in_path("node") {
+        return Ok(found);
+    }
+
+    if let Some(found) = search_in_fallback_dirs("node") {
+        return Ok(found);
+    }
+
+    if let Some(nvm_node) = latest_nvm_node_bin() {
+        return Ok(nvm_node);
+    }
+
+    Err(
+        "Unable to locate a Node.js binary. Install Node or set NODE_BINARY to an absolute path."
+            .to_string(),
+    )
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(stripped) = path.strip_prefix("~/") {
+        if let Some(home) = home_dir() {
+            return home.join(stripped);
+        }
+    }
+    PathBuf::from(path)
+}
+
+fn search_in_path(command: &str) -> Option<PathBuf> {
+    env::var_os("PATH").and_then(|paths| {
+        env::split_paths(&paths)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .find_map(|dir| candidate_in_dir(&dir, command))
+    })
+}
+
+fn search_in_fallback_dirs(command: &str) -> Option<PathBuf> {
+    let mut dirs = vec![
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/local/sbin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/opt/homebrew/sbin"),
+        PathBuf::from("/opt/local/bin"),
+        PathBuf::from("/opt/local/sbin"),
+    ];
+    if let Some(home) = home_dir() {
+        dirs.push(home.join(".volta/bin"));
+        dirs.push(home.join(".asdf/shims"));
+    }
+    dirs.into_iter()
+        .filter_map(|dir| candidate_in_dir(&dir, command))
+        .next()
+}
+
+fn candidate_in_dir(dir: &Path, command: &str) -> Option<PathBuf> {
+    let candidate = dir.join(command);
+    if candidate.is_file() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn latest_nvm_node_bin() -> Option<PathBuf> {
+    let base = home_dir()?.join(".nvm/versions/node");
+    let entries = fs::read_dir(base).ok()?;
+    let mut dirs: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| path.is_dir())
+        .collect();
+    dirs.sort();
+    dirs.into_iter()
+        .rev()
+        .filter_map(|dir| {
+            let candidate = dir.join("bin/node");
+            candidate.is_file().then_some(candidate)
+        })
+        .next()
 }
 
 fn spawn_line_reader<R>(state: ProxyState, reader: R, label: &'static str)
@@ -408,7 +552,7 @@ async fn start_proxy_impl(state: &ProxyState) -> Result<UiStatus, String> {
         return Err(format!("Desktop bridge missing: {}", script_path.display()));
     }
 
-    let node_bin = std::env::var("NODE_BINARY").unwrap_or_else(|_| "node".into());
+    let node_bin = resolve_node_binary()?;
     let mut command = Command::new(node_bin);
     command
         .arg(&script_path)
@@ -561,7 +705,6 @@ pub fn run() {
         ])
         .setup(|app| {
             let state = app.state::<ProxyState>().inner().clone();
-            let handle = app.handle().clone();
 
             // Create tray menu
             let start_i = MenuItem::with_id(app, "start-proxy", "Start Proxy", true, None::<&str>)?;
@@ -572,10 +715,11 @@ pub fn run() {
 
             let menu = Menu::with_items(app, &[&start_i, &stop_i, &dashboard_i, &logs_i, &quit_i])?;
 
+            let tray_state = state.clone();
             let tray = TrayIconBuilder::new()
                 .menu(&menu)
                 .on_menu_event(move |app, event| {
-                    let state_clone = state.clone();
+                    let state_clone = tray_state.clone();
                     let handle_clone = app.clone();
                     match event.id.as_ref() {
                         "start-proxy" => {

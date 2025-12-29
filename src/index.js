@@ -63,6 +63,18 @@ export async function startProxy(options = {}) {
     await bootstrapConfig();
     startClaudeMonitor(port);
 
+    // Proactively initialize account manager on startup
+    // This ensures accounts are loaded even if no API requests are made immediately
+    try {
+        const { ensureInitialized } = await import('./server.js');
+        await ensureInitialized().catch(err => {
+            console.warn('[Startup] Account manager initialization warning:', err.message);
+        });
+    } catch (err) {
+        // Ignore - will initialize on first request
+        console.warn('[Startup] Could not pre-initialize account manager:', err.message);
+    }
+
     await new Promise((resolve, reject) => {
         const server = app.listen(port, host, () => {
             serverHandle = server;

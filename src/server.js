@@ -264,6 +264,7 @@ app.use((req, res, next) => {
 
 /**
  * Health check endpoint
+ * Also triggers account manager initialization on first call
  */
 app.get('/health', async (req, res) => {
     try {
@@ -989,5 +990,8 @@ export function getRuntimeSnapshot() {
         };
     }
 }
+
+// Export for proactive initialization
+export { ensureInitialized };
 
 export default app;

@@ -1,18 +1,41 @@
 // Wait for Tauri to be ready
+async function waitForTauri(timeout = 5000) {
+  const getInvoker = () => window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke || window.__TAURI__?.tauri?.invoke;
+  if (getInvoker()) return window.__TAURI__;
+
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+
+    const check = () => {
+      if (getInvoker()) {
+        cleanup();
+        resolve(window.__TAURI__);
+      } else if (Date.now() - start >= timeout) {
+        cleanup();
+        reject(new Error('Tauri API not available'));
+      }
+    };
+
+    const events = ['tauri://ready', 'DOMContentLoaded', 'load'];
+    events.forEach((evt) => window.addEventListener(evt, check, { once: false }));
+    const interval = setInterval(check, 50);
+
+    function cleanup() {
+      clearInterval(interval);
+      events.forEach((evt) => window.removeEventListener(evt, check));
+    }
+
+    check();
+  });
+}
+
 const invoke = async (...args) => {
-  // Try to get invoke from __TAURI__
-  const tauri = window.__TAURI__;
-  if (tauri?.core?.invoke) {
-    return tauri.core.invoke(...args);
+  const tauri = await waitForTauri().catch(() => null);
+  const invoker = tauri?.core?.invoke || tauri?.invoke || tauri?.tauri?.invoke;
+  if (!invoker) {
+    throw new Error('Tauri API not available');
   }
-  if (tauri?.invoke) {
-    return tauri.invoke(...args);
-  }
-  // Fallback for older API
-  if (tauri?.tauri?.invoke) {
-    return tauri.tauri.invoke(...args);
-  }
-  throw new Error('Tauri API not available');
+  return invoker(...args);
 };
 
 const $ = (id) => document.getElementById(id);
@@ -211,10 +234,14 @@ function initApp() {
   if (statusMetaEl) statusMetaEl.textContent = 'Waiting for Tauri...';
 
   // Wait a bit for Tauri to be ready
-  setTimeout(() => {
-    refreshStatus();
-    setInterval(refreshStatus, 5000);
-  }, 200);
+  waitForTauri()
+    .then(() => {
+      refreshStatus();
+      setInterval(refreshStatus, 5000);
+    })
+    .catch((error) => {
+      setError(error?.message || String(error));
+    });
 }
 
 // Start when DOM is ready
